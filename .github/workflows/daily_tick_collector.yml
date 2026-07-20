@@ -1,0 +1,44 @@
+name: Daily TDX Tick Collector
+
+on:
+  schedule:
+    - cron: '30 8 * * 1-5' # 协调世界时 (UTC) 周一至周五 08:30 (即北京时间 16:30 自动收盘抓取)
+  workflow_dispatch:       # 支持随时手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  collect-ticks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+
+      - name: Install Runtime Dependencies
+        run: |
+          pip install -r requirements.txt
+          go mod init tick_fetcher || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+
+      - name: ⚙️ Run Master Collector Engine
+        run: python main.py
+
+      - name: 📤 Upload Captured Compressed Parquet Ticks
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdx-high-freq-ticks-db
+          path: output/*.parquet
+          retention-days: 7
