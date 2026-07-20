@@ -26,15 +26,260 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
+      - name: Create Scripts Directory
+        run: mkdir -p src
+
+      - name: 📝 Dynamically Write Corrected Fetcher Engine (fetcher.go)
+        run: |
+          cat << 'EOF' > src/fetcher.go
+          package main
+
+          import (
+          	"encoding/csv"
+          	"encoding/json"
+          	"flag"
+          	"fmt"
+          	"os"
+          	"strconv"
+          	"strings"
+          	"sync"
+
+          	"github.com/injoyai/tdx"
+          	"github.com/injoyai/tdx/protocol"
+          )
+
+          type StockMaster struct {
+          	Code     string `json:"code"`
+          	CodeName string `json:"code_name"`
+          }
+
+          func main() {
+          	modeFlag := flag.String("mode", "fetch", "运行模式: 'list' (拉取股票清单) 或 'fetch' (拉取历史成交分笔)")
+          	codesFlag := flag.String("codes", "", "待查询的股票代码列表 (逗号分隔)")
+          	dateFlag := flag.String("date", "", "查询日期 (格式 YYYYMMDD)")
+          	outFlag := flag.String("out", "temp_ticks.csv", "导出 CSV 路径")
+          	flag.Parse()
+
+          	switch *modeFlag {
+          	case "list":
+          		runFetchList()
+          	case "fetch":
+          		runFetchTicks(*codesFlag, *dateFlag, *outFlag)
+          	default:
+          		fmt.Println("❌ 未知运行模式。请使用: -mode=list 或 -mode=fetch")
+          		os.Exit(1)
+          	}
+          }
+
+          func runFetchList() {
+          	fmt.Println("[Fetcher 内核] 正在获取全市场 active A 股种子清单...")
+          	cli, err := tdx.DialDefault()
+          	if err != nil {
+          		panic(err)
+          	}
+          	defer cli.Close()
+
+          	var masterList []StockMaster
+          	exchanges := []protocol.Exchange{protocol.ExchangeSH, protocol.ExchangeSZ, protocol.ExchangeBJ}
+
+          	for _, ex := range exchanges {
+          		resp, err := cli.GetCodeAll(ex)
+          		if err != nil || resp == nil {
+          			continue
+          		}
+          		for _, item := range resp.List {
+          			if ex == protocol.ExchangeSH {
+          				if strings.HasPrefix(item.Code, "60") || strings.HasPrefix(item.Code, "68") {
+          					masterList = append(masterList, StockMaster{Code: "SH" + item.Code, CodeName: item.Name})
+          				}
+          			} else if ex == protocol.ExchangeSZ {
+          				if strings.HasPrefix(item.Code, "00") || strings.HasPrefix(item.Code, "30") {
+          					masterList = append(masterList, StockMaster{Code: "SZ" + item.Code, CodeName: item.Name})
+          				}
+          			} else if ex == protocol.ExchangeBJ {
+          				if strings.HasPrefix(item.Code, "43") || strings.HasPrefix(item.Code, "83") ||
+          					strings.HasPrefix(item.Code, "87") || strings.HasPrefix(item.Code, "88") ||
+          					strings.HasPrefix(item.Code, "92") {
+          					masterList = append(masterList, StockMaster{Code: "BJ" + item.Code, CodeName: item.Name})
+          				}
+          			}
+          		}
+          	}
+
+          	file, _ := os.Create("stock_list.json")
+          	defer file.Close()
+          	json.NewEncoder(file).Encode(masterList)
+          	fmt.Printf("[Fetcher 内核] 种子清单解析成功，共计 %d 只标的已落盘。\n", len(masterList))
+          }
+
+          func runFetchTicks(codesStr, dateStr, outPath string) {
+          	if codesStr == "" || dateStr == "" {
+          		fmt.Println("❌ 错误: -codes 和 -date 不能为空")
+          		os.Exit(1)
+          	}
+
+          	rawCodes := strings.Split(codesStr, ",")
+          	outFile, err := os.Create(outPath)
+          	if err != nil {
+          		panic(err)
+          	}
+          	defer outFile.Close()
+
+          	csvWriter := csv.NewWriter(outFile)
+          	defer csvWriter.Flush()
+
+          	csvWriter.Write([]string{"code", "date", "time", "price", "volume", "status", "number"})
+
+          	var mu sync.Mutex
+          	var wg sync.WaitGroup
+
+          	jobChan := make(chan string, len(rawCodes))
+          	for _, c := range rawCodes {
+          		jobChan <- strings.TrimSpace(c)
+          	}
+          	close(jobChan)
+
+          	concurrency := 6
+          	for i := 0; i < concurrency; i++ {
+          		wg.Add(1)
+          		go func() {
+          			defer wg.Done()
+          			workerCli, err := tdx.DialDefault()
+          			if err != nil {
+          				return
+          			}
+          			defer workerCli.Close()
+
+          			for tcode := range jobChan {
+          				var allTrades protocol.Trades
+          				start := 0
+          				
+          				for {
+          					resp, err := workerCli.GetHistoryTrade(dateStr, tcode, uint16(start), 2000)
+          					if err != nil || resp == nil || len(resp.List) == 0 {
+          						break
+          					}
+          					allTrades = append(allTrades, resp.List...)
+          					
+          					if len(resp.List) < 2000 {
+          						break
+          					}
+          					start += len(resp.List)
+          					
+          					if start > 60000 {
+          						break
+          					}
+          				}
+
+          				if len(allTrades) == 0 {
+          					continue
+          				}
+
+          				var records [][]string
+          				for _, t := range allTrades {
+          					timeStr := t.Time.Format("15:04:05")
+          					records = append(records, []string{
+          						tcode,
+          						dateStr,
+          						timeStr,
+          						fmt.Sprintf("%v", t.Price), // 🚀 最终关键修复点
+          						strconv.Itoa(int(t.Volume)),
+          						strconv.Itoa(t.Status),
+          						strconv.Itoa(t.Number),
+          					})
+          				}
+
+          				mu.Lock()
+          				csvWriter.WriteAll(records)
+          				mu.Unlock()
+          			}
+          		}()
+          	}
+
+          	wg.Wait()
+          }
+          EOF
+
+      - name: 📝 Dynamically Write Pipeline Utility (utils.py)
+        run: |
+          cat << 'EOF' > src/utils.py
+          import requests
+          import time
+          import os
+          import pandas as pd
+          import pyarrow as pa
+          import pyarrow.parquet as pq
+
+          def get_real_beijing_time():
+              try:
+                  resp = requests.head("https://www.baidu.com", timeout=3)
+                  if resp.status_code == 200 and "Date" in resp.headers:
+                      t = time.strptime(resp.headers["Date"], "%a, %d %b %Y %H:%M:%S GMT")
+                      bj_timestamp = time.mktime(t) + 8 * 3600
+                      return time.localtime(bj_timestamp)
+              except Exception:
+                  pass
+              return time.localtime()
+
+          def get_recent_trading_days(n=3):
+              bj_time = get_real_beijing_time()
+              curr_time = time.mktime(bj_time)
+              
+              if bj_time.tm_hour < 15:
+                  curr_time -= 24 * 3600
+                  
+              days = []
+              offset = 0
+              while len(days) < n:
+                  t = time.localtime(curr_time - offset * 24 * 3600)
+                  if t.tm_wday < 5:
+                      days.append(time.strftime("%Y%m%d", t))
+                  offset += 1
+              return days
+
+          def convert_csv_to_parquet(csv_path, parquet_path):
+              if not os.path.exists(csv_path) or os.path.getsize(csv_path) < 100:
+                  return False
+                  
+              arrow_schema = pa.schema([
+                  ('code', pa.string()),
+                  ('date', pa.string()),
+                  ('time', pa.string()),
+                  ('price', pa.float32()),
+                  ('volume', pa.int32()),
+                  ('direction', pa.int8()),
+                  ('order_num', pa.int32())
+              ])
+              
+              df = pd.read_csv(csv_path)
+              df.columns = ["code", "date", "time", "price", "volume", "direction", "order_num"]
+              
+              df["code"] = df["code"].astype(str)
+              df["date"] = df["date"].astype(str)
+              df["time"] = df["time"].astype(str)
+              
+              df["price"] = pd.to_numeric(df["price"], errors="coerce").astype("float32")
+              df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int32")
+              df["direction"] = pd.to_numeric(df["direction"], errors="coerce").fillna(2).astype("int8")
+              df["order_num"] = pd.to_numeric(df["order_num"], errors="coerce").fillna(0).astype("int32")
+              
+              table = pa.Table.from_pandas(df, schema=arrow_schema)
+              pq.write_table(table, parquet_path, compression="zstd")
+              return True
+          EOF
+
       - name: Install Runtime Dependencies
         run: |
           pip install -r requirements.txt
           go mod init tick_fetcher || true
-          go get github.com/injoyai/tdx@master # 🚀 修正点：强制拉取最新的 master 分支提交
-          go mod tidy                          # 🚀 自动补全 go.mod 与 go.sum
+          go get github.com/injoyai/tdx@master
+          go mod tidy
 
       - name: ⚙️ Run Master Collector Engine
-        run: python main.py
+        run: |
+          # 动态生成 config.json 默认执行生产全市场采集
+          echo '{"concurrency": 8, "test_mode": false, "days_to_fetch": 3}' > config.json
+          python main.py
 
       - name: 📤 Upload Captured Compressed Parquet Ticks
         uses: actions/upload-artifact@v4
