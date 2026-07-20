@@ -30,8 +30,8 @@ jobs:
         run: |
           pip install -r requirements.txt
           go mod init tick_fetcher || true
-          go get github.com/injoyai/tdx
-          go mod tidy
+          go get github.com/injoyai/tdx@master # 🚀 修正点：强制拉取最新的 master 分支提交
+          go mod tidy                          # 🚀 自动补全 go.mod 与 go.sum
 
       - name: ⚙️ Run Master Collector Engine
         run: python main.py
