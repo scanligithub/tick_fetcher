@@ -58,6 +58,11 @@ def convert_csv_to_parquet(csv_path, parquet_path):
     df = pd.read_csv(csv_path)
     df.columns = ["code", "date", "time", "price", "volume", "direction", "order_num"]
     
+    # 🚀 核心修复：显式强制转换 string 相关列为 str，防止 Pandas 自动推断为整型导致 PyArrow 类型不匹配
+    df["code"] = df["code"].astype(str)
+    df["date"] = df["date"].astype(str)
+    df["time"] = df["time"].astype(str)
+    
     # 数据安全类型转换
     df["price"] = pd.to_numeric(df["price"], errors="coerce").astype("float32")
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int32")
