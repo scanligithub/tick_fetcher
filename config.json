@@ -1,0 +1,6 @@
+{
+  "concurrency": 8,
+  "test_mode": false,
+  "test_stocks": ["SH600519", "SZ000001", "SZ300750"],
+  "days_to_fetch": 3
+}
