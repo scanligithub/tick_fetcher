@@ -121,15 +121,11 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 			defer workerCli.Close()
 
 			for tcode := range jobChan {
-				// 🚀 修正 1：将其类型显式声明为 protocol.Trades (切片别名类型对齐)
 				var allTrades protocol.Trades
-				
-				// 🚀 修正 2：将 start 声明为原生 int 防止后续判定常数发生 uint16 溢出
 				start := 0
 				
-				// 🔄 分页提取死循环：自动递增偏移量直到当天分笔被 100% 提取完毕
+				// 分页提取死循环：自动递增偏移量直到当天分笔被 100% 提取完毕
 				for {
-					// 🚀 转换入参：在实际发起网络调用时，转换为 uint16 类型
 					resp, err := workerCli.GetHistoryTrade(dateStr, tcode, uint16(start), 2000)
 					if err != nil || resp == nil || len(resp.List) == 0 {
 						break
@@ -142,7 +138,6 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 					}
 					start += len(resp.List)
 					
-					// 🚀 修正 2：uint16 物理边界为 65535，熔断指标安全设定为 60000 
 					if start > 60000 {
 						break
 					}
@@ -159,7 +154,7 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 						tcode,
 						dateStr,
 						timeStr,
-						fmt.Sprintf("%.3f", t.Price),
+						fmt.Sprintf("%v", t.Price), // 🚀 关键修复：采用默认格式化输出，自适应触发其内部 Stringer 接口，输出纯数字字符串 (例如 1524.22)
 						strconv.Itoa(int(t.Volume)),
 						strconv.Itoa(t.Status),
 						strconv.Itoa(t.Number),
