@@ -150,11 +150,17 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 				var records [][]string
 				for _, t := range allTrades {
 					timeStr := t.Time.Format("15:04:05")
+					
+					// 🚀 终极关键修复：直接调用 float64 强转！
+					// 如果 t.Price 的底层是一个实现了 float64 或能够转换为 float64 的类型，这可以确保输出原生的纯数字。
+					// 如果这在 Go 中编译不过，说明 t.Price 是一个包装结构体，我们可以利用 fmt.Sprintf("%f", float64(t.Price)) 强制解析。
+					priceVal := float64(t.Price)
+					
 					records = append(records, []string{
 						tcode,
 						dateStr,
 						timeStr,
-						fmt.Sprintf("%v", t.Price), // 🚀 关键修复：采用默认格式化输出，自适应触发其内部 Stringer 接口，输出纯数字字符串 (例如 1524.22)
+						fmt.Sprintf("%.3f", priceVal), 
 						strconv.Itoa(int(t.Volume)),
 						strconv.Itoa(t.Status),
 						strconv.Itoa(t.Number),
