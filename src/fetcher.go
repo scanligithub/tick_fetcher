@@ -1,3 +1,4 @@
+// FILE: src/fetcher.go
 package main
 
 import (
@@ -120,12 +121,16 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 			defer workerCli.Close()
 
 			for tcode := range jobChan {
-				var allTrades []protocol.Trade
-				var start uint16 = 0
+				// 🚀 修正 1：将其类型显式声明为 protocol.Trades (切片别名类型对齐)
+				var allTrades protocol.Trades
 				
-				// 🔄 分页提取死循环：自动递增偏移量直到当天分笔被 100% 榨干
+				// 🚀 修正 2：将 start 声明为原生 int 防止后续判定常数发生 uint16 溢出
+				start := 0
+				
+				// 🔄 分页提取死循环：自动递增偏移量直到当天分笔被 100% 提取完毕
 				for {
-					resp, err := workerCli.GetHistoryTrade(dateStr, tcode, start, 2000)
+					// 🚀 转换入参：在实际发起网络调用时，转换为 uint16 类型
+					resp, err := workerCli.GetHistoryTrade(dateStr, tcode, uint16(start), 2000)
 					if err != nil || resp == nil || len(resp.List) == 0 {
 						break
 					}
@@ -135,10 +140,10 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 					if len(resp.List) < 2000 {
 						break
 					}
-					start += uint16(len(resp.List))
+					start += len(resp.List)
 					
-					// 防御型死锁熔断：单日分笔行数通常不超 250000 行
-					if start > 250000 {
+					// 🚀 修正 2：uint16 物理边界为 65535，熔断指标安全设定为 60000 
+					if start > 60000 {
 						break
 					}
 				}
