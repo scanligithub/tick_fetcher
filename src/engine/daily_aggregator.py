@@ -3,6 +3,7 @@ import polars as pl
 def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights):
     if aligned_min_df.is_empty():
         return pl.DataFrame()
+        
     code = aligned_min_df["code"][0]
     date = aligned_min_df["trade_date"][0]
     daily_vol = aligned_min_df["volume_sum"].sum()
@@ -26,11 +27,13 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights)
         dq_weights.get("coverage_ratio", 0.3) * dir_coverage +
         dq_weights.get("non_empty_ratio", 0.3) * (1.0 - empty_ratio)
     )
+    
     price_response = abs(aligned_min_df["price_return"].sum())
     buy_aggression = buy_vol_sum / (daily_vol + 1e-8)
     sell_aggression = sell_vol_sum / (daily_vol + 1e-8)
     buy_absorption_raw = buy_aggression * (1.0 - min(price_response, 1.0)) * (buy_active_mins / 240.0)
     sell_absorption_raw = sell_aggression * (1.0 - min(price_response, 1.0)) * (sell_active_mins / 240.0)
+    
     return pl.DataFrame({
         "code": [code], "date": [date], "total_volume": [daily_vol], "total_amount": [daily_amt],
         "tick_count": [daily_ticks], "buy_volume_sum": [buy_vol_sum], "sell_volume_sum": [sell_vol_sum],
