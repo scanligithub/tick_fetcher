@@ -1,0 +1,10 @@
+concurrency: 4
+chunk_size: 500
+test_mode: false
+test_stocks: ["SZ000001", "SH600519"]
+days_to_fetch: 1
+tdx_servers:
+  - "119.147.212.81:7709"
+  - "124.74.236.94:7709"
+  - "218.75.126.9:7709"
+  - "115.238.90.165:7709"
