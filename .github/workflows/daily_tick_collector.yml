@@ -431,7 +431,6 @@ jobs:
               p10_val = aligned_min_df["imbalance"].quantile(0.1)
               p90_val = aligned_min_df["imbalance"].quantile(0.9)
               
-              # 🚀 核心修复：Polars DataFrame 没有 .len() 方法，使用标称属性 .height 完美对齐
               buy_active_mins = aligned_min_df.filter(pl.col("imbalance") > 0.3).height
               sell_active_mins = aligned_min_df.filter(pl.col("imbalance") < -0.3).height
               observed_ratio = aligned_min_df.filter(pl.col("has_trade")).height / 240.0
@@ -468,10 +467,11 @@ jobs:
           import polars as pl
 
           def evaluate_behavior_scores(daily_fact_df):
+              # 🚀 核心修复：将 .clamp 修正为 Polars 统一标准的 .clip()，防范底层 Expression 编译失败
               return daily_fact_df.with_columns([
-                  (pl.col("buy_absorption_raw") * (1.0 - pl.col("pp_60")) * (1.0 + pl.col("rs_5").clamp(0.0, 1.0)) * pl.col("data_quality_score")).alias("accumulation_score"),
-                  (pl.col("buy_aggression") * pl.col("price_response") * (1.0 + pl.col("rs_5").clamp(0.0, 1.0)) * pl.col("data_quality_score")).alias("attack_score"),
-                  (pl.col("sell_absorption_raw") * (1.0 - pl.col("pp_20")) * (1.0 - pl.col("bias_20").clamp(-1.0, 0.0)) * pl.col("data_quality_score")).alias("defense_score"),
+                  (pl.col("buy_absorption_raw") * (1.0 - pl.col("pp_60")) * (1.0 + pl.col("rs_5").clip(0.0, 1.0)) * pl.col("data_quality_score")).alias("accumulation_score"),
+                  (pl.col("buy_aggression") * pl.col("price_response") * (1.0 + pl.col("rs_5").clip(0.0, 1.0)) * pl.col("data_quality_score")).alias("attack_score"),
+                  (pl.col("sell_absorption_raw") * (1.0 - pl.col("pp_20")) * (1.0 - pl.col("bias_20").clip(-1.0, 0.0)) * pl.col("data_quality_score")).alias("defense_score"),
                   (pl.col("buy_absorption_raw") * pl.col("pp_60") * (1.0 - pl.col("price_response")) * pl.col("data_quality_score")).alias("distribution_score")
               ]).with_columns([
                   pl.struct([
@@ -528,7 +528,7 @@ jobs:
               return settings, factors
 
           def compile_go_core():
-              print("🛠️  正在编译 Go 核心网关...", flush=True)
+              print("🛠  正在编译 Go 核心网关...", flush=True)
               cmd = ["go", "build", "-o", "fetcher_core", "src/go_fetcher/fetcher.go"]
               res = subprocess.run(cmd, capture_output=True)
               if res.returncode != 0:
