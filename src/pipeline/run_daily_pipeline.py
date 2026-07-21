@@ -107,6 +107,10 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
     return pl.concat(results)
 
 def main():
+    # 🚀 物理修复：强制自建数据管道目录，防止 Go os.Create 因为找不到父目录而崩溃
+    os.makedirs("data/temp_chunks", exist_ok=True)
+    os.makedirs("data/output", exist_ok=True)
+    
     settings, factors = load_configs()
     compile_go_core()
     
