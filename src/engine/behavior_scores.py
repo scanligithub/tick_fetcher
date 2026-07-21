@@ -12,8 +12,8 @@ def evaluate_behavior_scores(daily_fact_df):
         ]).map_elements(lambda x: _determine_primary_state(x), return_dtype=pl.Struct([
             pl.Field("primary_state", pl.String),
             pl.Field("state_confidence", pl.Float64)
-        ]))
-    ]).unnest("primary_state")
+        ])).alias("state_struct")
+    ]).unnest("state_struct")
 
 def _determine_primary_state(scores):
     state_mapping = {
@@ -28,6 +28,7 @@ def _determine_primary_state(scores):
         if val is not None and val > best_score:
             best_score = val
             best_state = state
+            
     if best_score < 0.15:
         best_state = "NEUTRAL"
         best_score = 0.0
