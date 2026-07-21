@@ -183,8 +183,8 @@ func runFetchKLine(codesStr, outPath string) {
 					codeNum = tcode[2:]
 				}
 
-				// 🚀 已修复 1：GetKline 仅需要 4 个参数 (已去掉硬编码的分类 9)
-				resp, err := workerCli.GetKline(market, codeNum, 0, 100)
+				// 🚀 核心修复：将 market 显式强制转换为 uint8，契合 GetKline 底层类型定义
+				resp, err := workerCli.GetKline(uint8(market), codeNum, 0, 100)
 				if err != nil || resp == nil {
 					continue
 				}
@@ -192,7 +192,6 @@ func runFetchKLine(codesStr, outPath string) {
 				var records [][]string
 				for _, k := range resp.List {
 					dateStr := k.Time.Format("20060102") 
-					// 🚀 已修复 2：将 k.Price 修正为标准的 k.Volume 和 k.Amount 字段名
 					records = append(records, []string{
 						tcode, dateStr,
 						fmt.Sprintf("%.2f", k.Open), fmt.Sprintf("%.2f", k.High),
