@@ -183,7 +183,6 @@ func runFetchKLine(codesStr, outPath string) {
 					codeNum = tcode[2:]
 				}
 
-				// 🚀 核心修复：将 market 显式强制转换为 uint8，契合 GetKline 底层类型定义
 				resp, err := workerCli.GetKline(uint8(market), codeNum, 0, 100)
 				if err != nil || resp == nil {
 					continue
@@ -192,10 +191,11 @@ func runFetchKLine(codesStr, outPath string) {
 				var records [][]string
 				for _, k := range resp.List {
 					dateStr := k.Time.Format("20060102") 
+					// 🚀 黄金终极修复：对 k.Open, k.High, k.Low, k.Close 显式强转为 float64，彻底驱逐 %!f 格式化噪音
 					records = append(records, []string{
 						tcode, dateStr,
-						fmt.Sprintf("%.2f", k.Open), fmt.Sprintf("%.2f", k.High),
-						fmt.Sprintf("%.2f", k.Low), fmt.Sprintf("%.2f", k.Close),
+						fmt.Sprintf("%.2f", float64(k.Open)), fmt.Sprintf("%.2f", float64(k.High)),
+						fmt.Sprintf("%.2f", float64(k.Low)), fmt.Sprintf("%.2f", float64(k.Close)),
 						fmt.Sprintf("%.0f", float64(k.Volume)), 
 						fmt.Sprintf("%.2f", float64(k.Amount)), 
 					})
