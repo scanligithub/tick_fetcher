@@ -430,10 +430,13 @@ jobs:
               imbalance_std = aligned_min_df["imbalance"].std()
               p10_val = aligned_min_df["imbalance"].quantile(0.1)
               p90_val = aligned_min_df["imbalance"].quantile(0.9)
-              buy_active_mins = aligned_min_df.filter(pl.col("imbalance") > 0.3).len()
-              sell_active_mins = aligned_min_df.filter(pl.col("imbalance") < -0.3).len()
-              observed_ratio = aligned_min_df.filter(pl.col("has_trade")).len() / 240.0
-              empty_ratio = aligned_min_df.filter(pl.col("is_empty_bin")).len() / 240.0
+              
+              # 🚀 核心修复：Polars DataFrame 没有 .len() 方法，使用标称属性 .height 完美对齐
+              buy_active_mins = aligned_min_df.filter(pl.col("imbalance") > 0.3).height
+              sell_active_mins = aligned_min_df.filter(pl.col("imbalance") < -0.3).height
+              observed_ratio = aligned_min_df.filter(pl.col("has_trade")).height / 240.0
+              empty_ratio = aligned_min_df.filter(pl.col("is_empty_bin")).height / 240.0
+              
               dir_coverage = (buy_vol_sum + sell_vol_sum) / (daily_vol + 1e-8)
               dq_score = (
                   dq_weights.get("observed_ratio", 0.4) * observed_ratio +
@@ -627,13 +630,11 @@ jobs:
               bj_timestamp = time.mktime(bj_time_struct) + 8 * 3600
               bj_time = time.localtime(bj_timestamp)
 
-              # 🚀 物理层核心修复：若当前交易日尚未收盘并清算（定在下午 16:00 以前），则强制回退 1 天获取最近已清算的交易日数据
               if bj_time.tm_hour < 16:
                   print("🕒 当前时间尚未越过本日清算线(16:00)，系统将智能向后追溯上一交易日...", flush=True)
                   bj_timestamp -= 24 * 3600
                   bj_time = time.localtime(bj_timestamp)
 
-              # 循环回退直至避开非交易日（周末：周六=5, 周日=6）
               while bj_time.tm_wday >= 5:
                   print(f"📅 检测到非交易日 ({time.strftime('%Y%m%d', bj_time)})，自动回退穿越至前一天...", flush=True)
                   bj_timestamp -= 24 * 3600
