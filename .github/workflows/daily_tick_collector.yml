@@ -29,7 +29,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
-          go mod tidy
+          cd src/go_fetcher && go mod tidy && cd ../..
 
       - name: 🚀 Execute High-Performance Pipeline
         run: |
