@@ -13,6 +13,8 @@ from src.engine.auction_features import extract_auction_features
 from src.engine.limit_regime import calculate_limit_regime
 from src.engine.daily_aggregator import aggregate_to_daily_row
 from src.engine.behavior_scores import evaluate_behavior_scores
+from src.engine.price_context import calculate_price_context
+from src.engine.market_context import calculate_market_relative_strength
 
 def load_configs():
     with open("config/settings.yaml", "r") as f:
@@ -23,7 +25,6 @@ def load_configs():
 
 def compile_go_core():
     print("🛠  正在编译 Go 核心网关...", flush=True)
-    # 🚀 修复路径错位：必须切换到 src/go_fetcher 目录执行 go build，并将编译结果(fetcher_core)输出到项目根目录
     root_dir = os.getcwd()
     go_dir = os.path.join(root_dir, "src", "go_fetcher")
     out_path = os.path.join(root_dir, "fetcher_core")
@@ -47,33 +48,48 @@ def prepare_stock_list():
         with open("stock_list.json", "r") as f:
             return json.load(f)
     else:
-        print(f"❌ 错误：Go 网关初始化失败: {res.stderr.strip()}", flush=True)
+        print(f"❌ 错误：Go 网关初始化失败", flush=True)
         sys.exit(1)
 
 def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dict, factors: dict) -> pl.DataFrame:
-    csv_path = f"data/temp_chunks/chunk_{chunk_idx}.csv"
+    tick_csv = f"data/temp_chunks/chunk_{chunk_idx}_ticks.csv"
+    kline_csv = f"data/temp_chunks/chunk_{chunk_idx}_kline.csv"
+    index_csv = "data/temp_chunks/index_kline.csv" # 全局复用的大盘 K 线
     codes_str = ",".join(codes)
     
     print(f"▶️  [分片 {chunk_idx}] 启动，调度股票数量: {len(codes)}...", flush=True)
     
-    try:
-        res = subprocess.run([
-            "./fetcher_core", "-mode=fetch", f"-codes={codes_str}", f"-date={date_str}", f"-out={csv_path}"
-        ], capture_output=True, text=True, timeout=180)
-        
-        if res.returncode != 0:
-            print(f"[分片 {chunk_idx} 异常] Go 进程失败: {res.stderr}", flush=True)
-            return pl.DataFrame()
-    except subprocess.TimeoutExpired:
-        print(f"[分片 {chunk_idx} 超时] 该批次任务响应超时，强行截断。", flush=True)
-        return pl.DataFrame()
+    # 1. 抓取分时 Tick
+    subprocess.run(["./fetcher_core", "-mode=fetch", f"-codes={codes_str}", f"-date={date_str}", f"-out={tick_csv}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # 2. 抓取日线 K 线
+    subprocess.run(["./fetcher_core", "-mode=kline", f"-codes={codes_str}", f"-out={kline_csv}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
-    if not os.path.exists(csv_path) or os.path.getsize(csv_path) < 100:
+    if not os.path.exists(tick_csv) or os.path.getsize(tick_csv) < 100:
         return pl.DataFrame()
 
     print(f"📥 [分片 {chunk_idx}] 数据拉取完毕。启动 Polars 聚合清洗...", flush=True)
-    raw_df = clean_raw_ticks(csv_path)
-    os.remove(csv_path)
+    raw_df = clean_raw_ticks(tick_csv)
+    
+    # 3. 计算真实的个股位置(Price Context)和相对强弱(Market Context)
+    price_ctx_df = calculate_price_context(kline_csv)
+    market_ctx_df = calculate_market_relative_strength(kline_csv, index_csv)
+    
+    # 合并真实的 Context
+    real_context_df = pl.DataFrame({"code": codes})
+    if not price_ctx_df.is_empty():
+        real_context_df = real_context_df.join(price_ctx_df, on="code", how="left")
+    if not market_ctx_df.is_empty():
+        real_context_df = real_context_df.join(market_ctx_df, on="code", how="left")
+        
+    # 补全可能缺失的指标默认值
+    real_context_df = real_context_df.with_columns([
+        pl.col("pp_20").fill_null(0.5), pl.col("pp_60").fill_null(0.5),
+        pl.col("bias_20").fill_null(0.0), pl.col("rs_5").fill_null(0.0),
+        pl.col("atr_10").fill_null(0.1) # 默认 ATR 防止除 0
+    ])
+
+    if os.path.exists(tick_csv): os.remove(tick_csv)
+    if os.path.exists(kline_csv): os.remove(kline_csv)
 
     results = []
     for code in codes:
@@ -85,8 +101,14 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
         limit_features = calculate_limit_regime(
             single_ticks, prev_close, factors["limit_thresholds"]["limit_up_pct"], factors["limit_thresholds"]["limit_down_pct"]
         )
+        
+        # 从真实的 Context 中提取该股票的 ATR 波动率传给微窗计算
+        stock_ctx = real_context_df.filter(pl.col("code") == code)
+        atr_1m_val = float(stock_ctx["atr_10"][0] / 240.0) if not stock_ctx.is_empty() and stock_ctx["atr_10"][0] is not None else 0.01
+        
         aligned_bins = perform_micro_binning(
-            single_ticks, adv_1m=1000.0, atr_1m=0.01, eps_vol=float(factors["epsilon"]["vol"]), eps_res=float(factors["epsilon"]["res"])
+            single_ticks, adv_1m=1000.0, atr_1m=max(atr_1m_val, 0.001), 
+            eps_vol=float(factors["epsilon"]["vol"]), eps_res=float(factors["epsilon"]["res"])
         )
         if aligned_bins.is_empty(): continue
 
@@ -97,7 +119,12 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
     
     if len(results) == 0:
         return pl.DataFrame()
-    return pl.concat(results)
+        
+    # 将该分片的 Tick 事实数据与真实的 Context 数据进行横向拼合
+    chunk_fact_df = pl.concat(results)
+    chunk_final_df = chunk_fact_df.join(real_context_df, on="code", how="left")
+    
+    return chunk_final_df
 
 def main():
     os.makedirs("data/temp_chunks", exist_ok=True)
@@ -105,6 +132,10 @@ def main():
     
     settings, factors = load_configs()
     compile_go_core()
+    
+    # 提前抓取大盘基准日线 (上证指数 SH999999) 供所有分片复用算相对强弱
+    print("📈 正在获取大盘基准 K 线 (上证指数)...", flush=True)
+    subprocess.run(["./fetcher_core", "-mode=kline", "-codes=SH999999", "-out=data/temp_chunks/index_kline.csv"], stdout=subprocess.DEVNULL)
     
     all_stocks = prepare_stock_list()
     codes = [s["code"] for s in all_stocks]
@@ -152,15 +183,8 @@ def main():
 
     final_fact_df = pl.concat(daily_results)
     
-    context_df = pl.DataFrame({
-        "code": final_fact_df["code"],
-        "pp_20": [0.3] * len(final_fact_df),
-        "pp_60": [0.4] * len(final_fact_df),
-        "bias_20": [0.01] * len(final_fact_df),
-        "rs_5": [0.02] * len(final_fact_df)
-    })
-    final_fact_df = final_fact_df.join(context_df, on="code", how="left")
-    
+    # 🧠 现在，送入 evaluate_behavior_scores 的是拥有【真实灵魂 (PP/RS)】的 DataFrame
+    print("🧠 正在调制连续型机构高阶行为映射模型...", flush=True)
     output_df = evaluate_behavior_scores(final_fact_df)
     
     out_file = f"data/output/factors_{date_str}.parquet"
