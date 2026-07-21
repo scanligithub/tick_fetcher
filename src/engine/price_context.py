@@ -3,7 +3,7 @@ import polars as pl
 def calculate_price_context(kline_csv_path: str) -> pl.DataFrame:
     """读取真实的 100 日 K 线 CSV，计算最新的价格位置(PP)、乖离率(Bias)与波动率(ATR)。"""
     try:
-        # 🚀 显式声明 Dtypes，强制 Polars 将文本解析为 Float64 双精度浮点数
+        # 显式声明 Dtypes，强行对齐类型
         df = pl.read_csv(
             kline_csv_path,
             dtypes={
@@ -17,30 +17,37 @@ def calculate_price_context(kline_csv_path: str) -> pl.DataFrame:
                 "amount": pl.Float64
             }
         )
-    except Exception:
+    except Exception as e:
+        # 🚀 注入高精日志：如果是文件不存在、格式错乱或空表，直接在控制台亮起警告
+        print(f"⚠️ [Price Context] CSV 读取失败 ({kline_csv_path}): {e}", flush=True)
         return pl.DataFrame()
 
     if df.is_empty():
+        print(f"⚠️ [Price Context] CSV 文件存在但内容为空: {kline_csv_path}", flush=True)
         return pl.DataFrame()
 
-    df = df.sort(["code", "date"])
+    try:
+        df = df.sort(["code", "date"])
 
-    df = df.with_columns([
-        pl.col("close").rolling_min(window_size=20).over("code").alias("low_20"),
-        pl.col("close").rolling_max(window_size=20).over("code").alias("high_20"),
-        pl.col("close").rolling_min(window_size=60).over("code").alias("low_60"),
-        pl.col("close").rolling_max(window_size=60).over("code").alias("high_60"),
-        pl.col("close").rolling_mean(window_size=20).over("code").alias("ma20"),
-        (pl.col("high") - pl.col("low")).rolling_mean(window_size=10).over("code").alias("atr_10")
-    ])
+        df = df.with_columns([
+            pl.col("close").rolling_min(window_size=20).over("code").alias("low_20"),
+            pl.col("close").rolling_max(window_size=20).over("code").alias("high_20"),
+            pl.col("close").rolling_min(window_size=60).over("code").alias("low_60"),
+            pl.col("close").rolling_max(window_size=60).over("code").alias("high_60"),
+            pl.col("close").rolling_mean(window_size=20).over("code").alias("ma20"),
+            (pl.col("high") - pl.col("low")).rolling_mean(window_size=10).over("code").alias("atr_10")
+        ])
 
-    df = df.with_columns([
-        ((pl.col("close") - pl.col("low_20")) / (pl.col("high_20") - pl.col("low_20") + 1e-5)).alias("pp_20"),
-        ((pl.col("close") - pl.col("low_60")) / (pl.col("high_60") - pl.col("low_60") + 1e-5)).alias("pp_60"),
-        ((pl.col("close") / (pl.col("ma20") + 1e-5)) - 1.0).alias("bias_20")
-    ])
+        df = df.with_columns([
+            ((pl.col("close") - pl.col("low_20")) / (pl.col("high_20") - pl.col("low_20") + 1e-5)).alias("pp_20"),
+            ((pl.col("close") - pl.col("low_60")) / (pl.col("high_60") - pl.col("low_60") + 1e-5)).alias("pp_60"),
+            ((pl.col("close") / (pl.col("ma20") + 1e-5)) - 1.0).alias("bias_20")
+        ])
 
-    latest_context = df.group_by("code").last().select([
-        "code", "pp_20", "pp_60", "bias_20", "atr_10"
-    ])
-    return latest_context
+        latest_context = df.group_by("code").last().select([
+            "code", "pp_20", "pp_60", "bias_20", "atr_10"
+        ])
+        return latest_context
+    except Exception as e:
+        print(f"❌ [Price Context] 滚动算子推导崩溃: {e}", flush=True)
+        return pl.DataFrame()
