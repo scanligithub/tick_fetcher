@@ -35,11 +35,8 @@ def prepare_stock_list():
         with open("stock_list.json", "r") as f:
             return json.load(f)
 
-    print("📋 正在调用 Go 引擎 (DialDefault 自动弹性测速) 抓取全市场标的...", flush=True)
-    res = subprocess.run([
-        "./fetcher_core", "-mode=list"
-    ], capture_output=True, text=True)
-    
+    print("📋 正在抓取全市场标的...", flush=True)
+    res = subprocess.run(["./fetcher_core", "-mode=list"], capture_output=True, text=True)
     if res.returncode == 0:
         print("✅ 成功完成全市场标的初始化。", flush=True)
         with open("stock_list.json", "r") as f:
@@ -52,7 +49,7 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
     csv_path = f"data/temp_chunks/chunk_{chunk_idx}.csv"
     codes_str = ",".join(codes)
     
-    print(f"▶️  [分片 {chunk_idx}] 启动，调度股票数量: {len(codes)} (利用 DialDefault 自动择路)...", flush=True)
+    print(f"▶️  [分片 {chunk_idx}] 启动，调度股票数量: {len(codes)}...", flush=True)
     
     try:
         res = subprocess.run([
@@ -60,32 +57,25 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
         ], capture_output=True, text=True, timeout=180)
         
         if res.returncode != 0:
-            print(f"[分片 {chunk_idx} 异常] Go 进程返回失败: {res.stderr}", flush=True)
+            print(f"[分片 {chunk_idx} 异常] Go 进程失败: {res.stderr}", flush=True)
             return pl.DataFrame()
     except subprocess.TimeoutExpired:
-        print(f"[分片 {chunk_idx} 超时] 该批次任务响应超时 (180秒限额已耗尽)，强行截断。", flush=True)
+        print(f"[分片 {chunk_idx} 超时] 该批次任务响应超时，强行截断。", flush=True)
         return pl.DataFrame()
     
     if not os.path.exists(csv_path) or os.path.getsize(csv_path) < 100:
-        print(f"[分片 {chunk_idx}] 未获取到任何有效成交 facts，此分片为空。", flush=True)
         return pl.DataFrame()
 
-    print(f"📥 [分片 {chunk_idx}] 数据拉取完毕。启动 Polars 极速重采样与量化特征推演...", flush=True)
+    print(f"📥 [分片 {chunk_idx}] 数据拉取完毕。启动 Polars 聚合清洗...", flush=True)
     raw_df = clean_raw_ticks(csv_path)
-    
-    if os.path.exists(csv_path):
-        os.remove(csv_path)
+    os.remove(csv_path)
 
     results = []
-    success_count = 0
     for code in codes:
         single_ticks = raw_df.filter(pl.col("code") == code)
-        if single_ticks.is_empty():
-            continue
+        if single_ticks.is_empty(): continue
         
-        prices = single_ticks["price"]
-        prev_close = float(prices[0])
-        
+        prev_close = float(single_ticks["price"][0])
         auction_features = extract_auction_features(single_ticks, prev_close)
         limit_features = calculate_limit_regime(
             single_ticks, prev_close, factors["limit_thresholds"]["limit_up_pct"], factors["limit_thresholds"]["limit_down_pct"]
@@ -93,21 +83,18 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
         aligned_bins = perform_micro_binning(
             single_ticks, adv_1m=1000.0, atr_1m=0.01, eps_vol=float(factors["epsilon"]["vol"]), eps_res=float(factors["epsilon"]["res"])
         )
-        if aligned_bins.is_empty():
-            continue
+        if aligned_bins.is_empty(): continue
 
         daily_fact = aggregate_to_daily_row(aligned_bins, limit_features, auction_features, factors["data_quality_weights"])
         results.append(daily_fact)
-        success_count += 1
 
-    print(f"⏹️  [分片 {chunk_idx}] 处理完毕。成功解析标的数量: {success_count} / {len(codes)}", flush=True)
+    print(f"⏹️  [分片 {chunk_idx}] 处理完毕。解析标的数量: {len(results)} / {len(codes)}", flush=True)
     
     if len(results) == 0:
         return pl.DataFrame()
     return pl.concat(results)
 
 def main():
-    # 🚀 物理修复：强制自建数据管道目录，防止 Go os.Create 因为找不到父目录而崩溃
     os.makedirs("data/temp_chunks", exist_ok=True)
     os.makedirs("data/output", exist_ok=True)
     
@@ -118,28 +105,24 @@ def main():
     codes = [s["code"] for s in all_stocks]
     
     if settings.get("test_mode", False):
-        print("⚠️  当前处于 [测试运行模式]，仅计算测试样例标的。", flush=True)
         codes = settings.get("test_stocks", ["SZ000001"])
         
     import requests, time
-    print("📡 正在获取授时中心(百度)高精真实北京时间...", flush=True)
     resp = requests.head("https://www.baidu.com")
     bj_time_struct = time.strptime(resp.headers["Date"], "%a, %d %b %Y %H:%M:%S GMT")
     bj_timestamp = time.mktime(bj_time_struct) + 8 * 3600
     bj_time = time.localtime(bj_timestamp)
 
     if bj_time.tm_hour < 16:
-        print("🕒 当前时间尚未越过本日清算线(16:00)，系统将智能向后追溯上一交易日...", flush=True)
         bj_timestamp -= 24 * 3600
         bj_time = time.localtime(bj_timestamp)
 
     while bj_time.tm_wday >= 5:
-        print(f"📅 检测到非交易日 ({time.strftime('%Y%m%d', bj_time)})，自动回退穿越至前一天...", flush=True)
         bj_timestamp -= 24 * 3600
         bj_time = time.localtime(bj_timestamp)
 
     date_str = time.strftime("%Y%m%d", bj_time)
-    print(f"📅 本日数据结算目标日期: {date_str} (周{(bj_time.tm_wday + 1)})", flush=True)
+    print(f"📅 本日数据结算目标日期: {date_str}", flush=True)
     
     chunk_size = settings.get("chunk_size", 500)
     chunks = [codes[i:i + chunk_size] for i in range(0, len(codes), chunk_size)]
@@ -147,7 +130,7 @@ def main():
     daily_results = []
     concurrency = settings.get("concurrency", 4)
     
-    print(f"🔥 启动并发任务线: 并发因子 = {concurrency}，计划提取批次 = {len(chunks)} 个", flush=True)
+    print(f"🔥 启动并发任务线: 并发度={concurrency}，总批次={len(chunks)}", flush=True)
     
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = []
@@ -159,10 +142,9 @@ def main():
                 daily_results.append(res_df)
 
     if len(daily_results) == 0:
-        print("❌ 本日全市场高频清洗流程未能成功产出有效原子因子。", flush=True)
+        print("❌ 本日全市场高频清洗未能产出数据。", flush=True)
         sys.exit(0)
 
-    print("🧱 正在进行全市场分片原子特征物理重组与对齐...", flush=True)
     final_fact_df = pl.concat(daily_results)
     
     context_df = pl.DataFrame({
@@ -172,15 +154,13 @@ def main():
         "bias_20": [0.01] * len(final_fact_df),
         "rs_5": [0.02] * len(final_fact_df)
     })
-    
     final_fact_df = final_fact_df.join(context_df, on="code", how="left")
     
-    print("🧠 正在调制连续型机构高阶行为映射模型...", flush=True)
     output_df = evaluate_behavior_scores(final_fact_df)
     
     out_file = f"data/output/factors_{date_str}.parquet"
     output_df.write_parquet(out_file, compression="zstd")
-    print(f"🏁 日级高维机构行为特征文件处理成功，并已压缩存储于: {out_file}", flush=True)
+    print(f"🏁 日级高维特征落盘成功: {out_file}", flush=True)
 
 if __name__ == "__main__":
     main()
