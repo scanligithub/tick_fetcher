@@ -40,7 +40,7 @@ func main() {
 func runFetchList() {
 	cli, err := tdx.DialDefault()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: 无法通过 DialDefault 连接到任何可用的通达信服务器: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: 无法通过 DialDefault 连接: %v\n", err)
 		os.Exit(2)
 	}
 	defer cli.Close()
@@ -79,10 +79,9 @@ func runFetchList() {
 
 func runFetchTicks(codesStr, dateStr, outPath string) {
 	rawCodes := strings.Split(codesStr, ",")
-	
 	outFile, err := os.Create(outPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: 无法创建本地数据转储容器: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: 无法创建文件: %v\n", err)
 		os.Exit(3)
 	}
 	defer outFile.Close()
