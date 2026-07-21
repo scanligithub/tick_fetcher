@@ -1,0 +1,14 @@
+data_quality_weights:
+  observed_ratio: 0.4
+  coverage_ratio: 0.3
+  non_empty_ratio: 0.3
+
+imbalance_threshold: 0.3
+
+limit_thresholds:
+  limit_up_pct: 0.099
+  limit_down_pct: -0.099
+
+epsilon:
+  vol: 1e-5
+  res: 1e-5
