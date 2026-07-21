@@ -28,27 +28,16 @@ jobs:
 
       - name: ⚙️ Create Directories
         run: |
-          mkdir -p config src/go_fetcher src/engine src/pipeline data/output data/temp_chunks
+          mkdir -p config src/go_fetcher/ src/engine/ src/pipeline/ data/output/ data/temp_chunks/
 
       - name: 📝 Write Config Files
         run: |
           cat << 'EOF' > config/settings.yaml
-          concurrency: 3
+          concurrency: 4
           chunk_size: 500
           test_mode: false
           test_stocks: ["SZ000001", "SH600519"]
           days_to_fetch: 1
-          tdx_servers:
-            - "119.147.212.81:7709"
-            - "124.74.236.94:7709"
-            - "218.75.126.9:7709"
-            - "115.238.90.165:7709"
-            - "121.14.110.210:7709"
-            - "123.125.108.24:7709"
-            - "180.153.18.170:7709"
-            - "61.152.107.141:7709"
-            - "119.29.51.30:7709"
-            - "221.231.141.60:7709"
           EOF
 
           cat << 'EOF' > config/factor_config.yaml
@@ -113,24 +102,24 @@ jobs:
           	codesFlag := flag.String("codes", "", "待查询的股票代码列表")
           	dateFlag := flag.String("date", "", "查询日期")
           	outFlag := flag.String("out", "temp_ticks.csv", "导出 CSV 路径")
-          	serverFlag := flag.String("server", "119.147.212.81:7709", "服务器")
           	flag.Parse()
 
           	switch *modeFlag {
           	case "list":
-          		runFetchList(*serverFlag)
+          		runFetchList()
           	case "fetch":
-          		runFetchTicks(*codesFlag, *dateFlag, *outFlag, *serverFlag)
+          		runFetchTicks(*codesFlag, *dateFlag, *outFlag)
           	default:
           		fmt.Fprintf(os.Stderr, "❌ 未知运行模式\n")
           		os.Exit(1)
           	}
           }
 
-          func runFetchList(server string) {
-          	cli, err := tdx.Dial(server)
+          func runFetchList() {
+          	// 使用 DialDefault 启用底层库的自动测速与最优路由选择
+          	cli, err := tdx.DialDefault()
           	if err != nil {
-          		fmt.Fprintf(os.Stderr, "Error: 无法建立与服务器 %s 的 TCP 拨号连接: %v\n", server, err)
+          		fmt.Fprintf(os.Stderr, "Error: 无法通过 DialDefault 连接到任何可用的通达信服务器: %v\n", err)
           		os.Exit(2)
           	}
           	defer cli.Close()
@@ -167,7 +156,7 @@ jobs:
           	json.NewEncoder(file).Encode(masterList)
           }
 
-          func runFetchTicks(codesStr, dateStr, outPath, server string) {
+          func runFetchTicks(codesStr, dateStr, outPath string) {
           	rawCodes := strings.Split(codesStr, ",")
           	
           	outFile, err := os.Create(outPath)
@@ -195,7 +184,7 @@ jobs:
           		wg.Add(1)
           		go func() {
           			defer wg.Done()
-          			workerCli, err := tdx.Dial(server)
+          			workerCli, err := tdx.DialDefault()
           			if err != nil {
           				return
           			}
@@ -543,50 +532,46 @@ jobs:
                   sys.exit(1)
               print("✅ 核心网关编译成功。", flush=True)
 
-          def prepare_stock_list(servers: list):
-              """自愈式多服务器名单抓取，遇到 Block 自动切换下一个物理 Host"""
+          def prepare_stock_list():
+              """完美还原：直接使用编译好的 Go 引擎进行 DialDefault 自动连接与自适应测速"""
               if os.path.exists("stock_list.json"):
                   with open("stock_list.json", "r") as f:
                       return json.load(f)
 
-              for idx, server in enumerate(servers):
-                  print(f"📋 尝试通过服务器 [{idx+1}/{len(servers)}] {server} 拉取 A 股种子名单...", flush=True)
-                  res = subprocess.run([
-                      "./fetcher_core", "-mode=list", f"-server={server}"
-                  ], capture_output=True, text=True)
-                  
-                  if res.returncode == 0:
-                      print(f"✅ 成功连接服务器 {server} 并拉取 A 股标的清单。", flush=True)
-                      with open("stock_list.json", "r") as f:
-                          return json.load(f)
-                  else:
-                      err_msg = res.stderr.strip() if res.stderr else "Connection Timeout"
-                      print(f"⚠️  物理服务器 {server} 响应超时/不可用: {err_msg}", flush=True)
+              print("📋 正在调用 Go 引擎 (DialDefault 测速) 抓取全市场标的...", flush=True)
+              res = subprocess.run([
+                  "./fetcher_core", "-mode=list"
+              ], capture_output=True, text=True)
+              
+              if res.returncode == 0:
+                  print("✅ 成功完成全市场标的初始化。", flush=True)
+                  with open("stock_list.json", "r") as f:
+                      return json.load(f)
+              else:
+                  print(f"❌ 错误：Go 网关初始化失败: {res.stderr.strip()}", flush=True)
+                  sys.exit(1)
 
-              print("❌ 错误：尝试了配置文件中所有的通达信物理节点，网络均被拦截。请在 Settings 中更新可用的备用行情服务器 IP。", flush=True)
-              sys.exit(1)
-
-          def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, server: str, settings: dict, factors: dict) -> pl.DataFrame:
+          def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dict, factors: dict) -> pl.DataFrame:
               csv_path = f"data/temp_chunks/chunk_{chunk_idx}.csv"
               codes_str = ",".join(codes)
               
-              print(f"▶️  [分片 {chunk_idx}] 启动，调度股票数量: {len(codes)}，连接物理节点: {server}...", flush=True)
+              print(f"▶️  [分片 {chunk_idx}] 启动，调度股票数量: {len(codes)} (利用 DialDefault 自动择路)...", flush=True)
               
-              # 3 分钟强制网络超时防挂死，捕获标准输出
+              # 3分钟超时阈值防卡死，由 Go 内核自动选取最佳服务器
               try:
                   res = subprocess.run([
-                      "./fetcher_core", "-mode=fetch", f"-codes={codes_str}", f"-date={date_str}", f"-out={csv_path}", f"-server={server}"
+                      "./fetcher_core", "-mode=fetch", f"-codes={codes_str}", f"-date={date_str}", f"-out={csv_path}"
                   ], capture_output=True, text=True, timeout=180)
                   
                   if res.returncode != 0:
                       print(f"[分片 {chunk_idx} 异常] Go 进程返回失败: {res.stderr}", flush=True)
                       return pl.DataFrame()
               except subprocess.TimeoutExpired:
-                  print(f"[分片 {chunk_idx} 超时] 该物理节点 {server} 响应超时 (180秒限额已耗尽)，强行挂断以避免死锁。", flush=True)
+                  print(f"[分片 {chunk_idx} 超时] 该批次任务响应超时 (180秒限额已耗尽)，强行截断。", flush=True)
                   return pl.DataFrame()
               
               if not os.path.exists(csv_path) or os.path.getsize(csv_path) < 100:
-                  print(f"[分片 {chunk_idx}] 未获取到任何有效成交事实字节，此分片为空。", flush=True)
+                  print(f"[分片 {chunk_idx}] 未获取到任何有效成交 facts，此分片为空。", flush=True)
                   return pl.DataFrame()
 
               print(f"📥 [分片 {chunk_idx}] 数据拉取完毕。启动 Polars 极速重采样与量化特征推演...", flush=True)
@@ -628,10 +613,9 @@ jobs:
           def main():
               settings, factors = load_configs()
               compile_go_core()
-              servers = settings.get("tdx_servers", ["119.147.212.81:7709"])
               
-              # 自愈型抓取
-              all_stocks = prepare_stock_list(servers)
+              # 自建弹性种子清单
+              all_stocks = prepare_stock_list()
               codes = [s["code"] for s in all_stocks]
               
               if settings.get("test_mode", False):
@@ -661,8 +645,7 @@ jobs:
               with ThreadPoolExecutor(max_workers=concurrency) as executor:
                   futures = []
                   for idx, subset in enumerate(chunks):
-                      srv = servers[idx % len(servers)]
-                      futures.append(executor.submit(run_chunk_pipeline, idx, subset, date_str, srv, settings, factors))
+                      futures.append(executor.submit(run_chunk_pipeline, idx, subset, date_str, settings, factors))
                   for f in futures:
                       res_df = f.result()
                       if res_df is not None and not res_df.is_empty():
