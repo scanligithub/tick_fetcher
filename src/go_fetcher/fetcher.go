@@ -20,28 +20,28 @@ type StockMaster struct {
 }
 
 func main() {
-	modeFlag := flag.String("mode", "fetch", "运行模式: 'list' (拉取股票清单) 或 'fetch' (拉取历史成交分笔)")
-	codesFlag := flag.String("codes", "", "待查询的股票代码列表 (逗号分隔)")
-	dateFlag := flag.String("date", "", "查询日期 (格式 YYYYMMDD)")
+	modeFlag := flag.String("mode", "fetch", "运行模式")
+	codesFlag := flag.String("codes", "", "待查询的股票代码列表")
+	dateFlag := flag.String("date", "", "查询日期")
 	outFlag := flag.String("out", "temp_ticks.csv", "导出 CSV 路径")
-	serverFlag := flag.String("server", "119.147.212.81:7709", "指定通达信服务器IP:PORT")
 	flag.Parse()
 
 	switch *modeFlag {
 	case "list":
-		runFetchList(*serverFlag)
+		runFetchList()
 	case "fetch":
-		runFetchTicks(*codesFlag, *dateFlag, *outFlag, *serverFlag)
+		runFetchTicks(*codesFlag, *dateFlag, *outFlag)
 	default:
-		fmt.Println("❌ 未知运行模式")
+		fmt.Fprintf(os.Stderr, "❌ 未知运行模式\n")
 		os.Exit(1)
 	}
 }
 
-func runFetchList(server string) {
-	cli, err := tdx.Dial(server)
+func runFetchList() {
+	cli, err := tdx.DialDefault()
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Error: 无法通过 DialDefault 连接到任何可用的通达信服务器: %v\n", err)
+		os.Exit(2)
 	}
 	defer cli.Close()
 
@@ -77,22 +77,18 @@ func runFetchList(server string) {
 	json.NewEncoder(file).Encode(masterList)
 }
 
-func runFetchTicks(codesStr, dateStr, outPath, server string) {
-	if codesStr == "" || dateStr == "" {
-		fmt.Println("❌ 错误: -codes 和 -date 不能为空")
-		os.Exit(1)
-	}
-
+func runFetchTicks(codesStr, dateStr, outPath string) {
 	rawCodes := strings.Split(codesStr, ",")
+	
 	outFile, err := os.Create(outPath)
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Error: 无法创建本地数据转储容器: %v\n", err)
+		os.Exit(3)
 	}
 	defer outFile.Close()
 
 	csvWriter := csv.NewWriter(outFile)
 	defer csvWriter.Flush()
-
 	csvWriter.Write([]string{"code", "date", "time", "price", "volume", "status", "number"})
 
 	var mu sync.Mutex
@@ -109,7 +105,7 @@ func runFetchTicks(codesStr, dateStr, outPath, server string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			workerCli, err := tdx.Dial(server)
+			workerCli, err := tdx.DialDefault()
 			if err != nil {
 				return
 			}
