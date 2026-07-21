@@ -23,8 +23,13 @@ def load_configs():
 
 def compile_go_core():
     print("🛠  正在编译 Go 核心网关...", flush=True)
-    cmd = ["go", "build", "-o", "fetcher_core", "src/go_fetcher/fetcher.go"]
-    res = subprocess.run(cmd, capture_output=True)
+    # 🚀 修复路径错位：必须切换到 src/go_fetcher 目录执行 go build，并将编译结果(fetcher_core)输出到项目根目录
+    root_dir = os.getcwd()
+    go_dir = os.path.join(root_dir, "src", "go_fetcher")
+    out_path = os.path.join(root_dir, "fetcher_core")
+    
+    cmd = ["go", "build", "-o", out_path, "fetcher.go"]
+    res = subprocess.run(cmd, cwd=go_dir, capture_output=True)
     if res.returncode != 0:
         print(f"❌ 编译失败: {res.stderr.decode('utf-8')}", flush=True)
         sys.exit(1)
