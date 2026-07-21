@@ -60,9 +60,14 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
     print(f"▶️  [分片 {chunk_idx}] 启动，调度股票数量: {len(codes)}...", flush=True)
     
     # 抓取分时 Tick
-    subprocess.run(["./fetcher_core", "-mode=fetch", f"-codes={codes_str}", f"-date={date_str}", f"-out={tick_csv}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # 抓取个股日线
-    subprocess.run(["./fetcher_core", "-mode=kline", f"-codes={codes_str}", f"-out={kline_csv}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    res_ticks = subprocess.run(["./fetcher_core", "-mode=fetch", f"-codes={codes_str}", f"-date={date_str}", f"-out={tick_csv}"], capture_output=True, text=True)
+    if res_ticks.returncode != 0:
+        print(f"❌ [分片 {chunk_idx} - Tick拉取报错]: {res_ticks.stderr}", flush=True)
+
+    # 🚀 解除静默：抓取个股日线并全面监控其 Stderr 
+    res_kline = subprocess.run(["./fetcher_core", "-mode=kline", f"-codes={codes_str}", f"-out={kline_csv}"], capture_output=True, text=True)
+    if res_kline.returncode != 0:
+        print(f"❌ [分片 {chunk_idx} - K线拉取报错]: {res_kline.stderr}", flush=True)
     
     if not os.path.exists(tick_csv) or os.path.getsize(tick_csv) < 100:
         return pl.DataFrame()
@@ -79,7 +84,6 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
     if not market_ctx_df.is_empty():
         real_context_df = real_context_df.join(market_ctx_df, on="code", how="left")
         
-    # 🚀 极致自愈修正：动态探测特征列是否存在。若不存在（如下载失败），直接原地自建默认常数列，阻断崩溃！
     fallback_map = {
         "pp_20": 0.5,
         "pp_60": 0.5,
@@ -135,9 +139,11 @@ def main():
     settings, factors = load_configs()
     compile_go_core()
     
-    # 🚀 修正：将上证指数代码变更为全球通用的 SH000001
+    # 🚀 解除静默：对大盘基准 K 线获取过程进行全面监控
     print("📈 正在获取大盘基准 K 线 (上证指数)...", flush=True)
-    subprocess.run(["./fetcher_core", "-mode=kline", "-codes=SH000001", "-out=data/temp_chunks/index_kline.csv"], stdout=subprocess.DEVNULL)
+    res_index = subprocess.run(["./fetcher_core", "-mode=kline", "-codes=SH000001", "-out=data/temp_chunks/index_kline.csv"], capture_output=True, text=True)
+    if res_index.returncode != 0:
+        print(f"❌ 大盘 K 线拉取失败: {res_index.stderr}", flush=True)
     
     all_stocks = prepare_stock_list()
     codes = [s["code"] for s in all_stocks]
