@@ -1,33 +1,30 @@
 import polars as pl
 
-def calculate_market_relative_strength(
-    stock_daily: pl.DataFrame, 
-    index_daily: pl.DataFrame
-) -> pl.DataFrame:
-    """
-    Layer 4.2: 个股对大盘的相对强弱因子 (RS5, RS20)。
-    """
-    # 规范大盘列名
-    idx_df = index_daily.select([
-        pl.col("date"),
-        pl.col("close").alias("idx_close")
-    ])
+def calculate_market_relative_strength(kline_csv_path: str, index_csv_path: str) -> pl.DataFrame:
+    """计算个股相对大盘(上证指数)的真实 5 日超额收益率 (RS_5)"""
+    try:
+        stock_df = pl.read_csv(kline_csv_path, dtypes={"code": pl.String, "date": pl.String})
+        index_df = pl.read_csv(index_csv_path, dtypes={"code": pl.String, "date": pl.String})
+    except Exception:
+        return pl.DataFrame()
+
+    if stock_df.is_empty() or index_df.is_empty():
+        return pl.DataFrame()
+
+    # 计算个股 5 日收益率
+    stock_df = stock_df.sort(["code", "date"]).with_columns([
+        (pl.col("close") / pl.col("close").shift(5).over("code") - 1.0).alias("stock_ret_5")
+    ]).group_by("code").last().select(["code", "stock_ret_5"])
+
+    # 计算大盘 5 日收益率
+    index_df = index_df.sort("date").with_columns([
+        (pl.col("close") / pl.col("close").shift(5) - 1.0).alias("idx_ret_5")
+    ]).last()
     
-    merged = stock_daily.join(idx_df, on="date", how="left")
-    merged = merged.sort("date")
+    idx_ret = float(index_df["idx_ret_5"][0]) if not index_df.is_empty() and index_df["idx_ret_5"][0] is not None else 0.0
 
-    # 计算 5 日与 20 日收益率
-    merged = merged.with_columns([
-        (pl.col("close") / pl.col("close").shift(5) - 1.0).alias("stock_ret_5"),
-        (pl.col("close") / pl.col("close").shift(20) - 1.0).alias("stock_ret_20"),
-        (pl.col("idx_close") / pl.col("idx_close").shift(5) - 1.0).alias("idx_ret_5"),
-        (pl.col("idx_close") / pl.col("idx_close").shift(20) - 1.0).alias("idx_ret_20")
+    # 合并计算超额收益 RS_5
+    res = stock_df.with_columns([
+        (pl.col("stock_ret_5") - idx_ret).fill_null(0.0).alias("rs_5")
     ])
-
-    # 相对超额收益 (RS)
-    merged = merged.with_columns([
-        (pl.col("stock_ret_5") - pl.col("idx_ret_5")).fill_null(0.0).alias("rs_5"),
-        (pl.col("stock_ret_20") - pl.col("idx_ret_20")).fill_null(0.0).alias("rs_20")
-    ])
-
-    return merged.select(["date", "rs_5", "rs_20"])
+    return res.select(["code", "rs_5"])
