@@ -3,14 +3,26 @@ import polars as pl
 def calculate_price_context(kline_csv_path: str) -> pl.DataFrame:
     """读取真实的 100 日 K 线 CSV，计算最新的价格位置(PP)、乖离率(Bias)与波动率(ATR)。"""
     try:
-        df = pl.read_csv(kline_csv_path, dtypes={"code": pl.String, "date": pl.String})
+        # 🚀 显式声明 Dtypes，强制 Polars 将文本解析为 Float64 双精度浮点数
+        df = pl.read_csv(
+            kline_csv_path,
+            dtypes={
+                "code": pl.String,
+                "date": pl.String,
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "volume": pl.Float64,
+                "amount": pl.Float64
+            }
+        )
     except Exception:
         return pl.DataFrame()
 
     if df.is_empty():
         return pl.DataFrame()
 
-    # 确保按日期升序，方便滚动计算
     df = df.sort(["code", "date"])
 
     df = df.with_columns([
@@ -28,7 +40,6 @@ def calculate_price_context(kline_csv_path: str) -> pl.DataFrame:
         ((pl.col("close") / (pl.col("ma20") + 1e-5)) - 1.0).alias("bias_20")
     ])
 
-    # 取每只股票最新的一天（即本次计算目标日）的截面数据
     latest_context = df.group_by("code").last().select([
         "code", "pp_20", "pp_60", "bias_20", "atr_10"
     ])
