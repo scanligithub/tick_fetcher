@@ -31,6 +31,8 @@ func main() {
 		runFetchList()
 	case "fetch":
 		runFetchTicks(*codesFlag, *dateFlag, *outFlag)
+	case "kline":
+		runFetchKLine(*codesFlag, *outFlag)
 	default:
 		fmt.Fprintf(os.Stderr, "❌ 未知运行模式\n")
 		os.Exit(1)
@@ -40,7 +42,6 @@ func main() {
 func runFetchList() {
 	cli, err := tdx.DialDefault()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: 无法通过 DialDefault 连接: %v\n", err)
 		os.Exit(2)
 	}
 	defer cli.Close()
@@ -54,24 +55,15 @@ func runFetchList() {
 			continue
 		}
 		for _, item := range resp.List {
-			if ex == protocol.ExchangeSH {
-				if strings.HasPrefix(item.Code, "60") || strings.HasPrefix(item.Code, "68") {
-					masterList = append(masterList, StockMaster{Code: "SH" + item.Code, CodeName: item.Name})
-				}
-			} else if ex == protocol.ExchangeSZ {
-				if strings.HasPrefix(item.Code, "00") || strings.HasPrefix(item.Code, "30") {
-					masterList = append(masterList, StockMaster{Code: "SZ" + item.Code, CodeName: item.Name})
-				}
-			} else if ex == protocol.ExchangeBJ {
-				if strings.HasPrefix(item.Code, "43") || strings.HasPrefix(item.Code, "83") ||
-					strings.HasPrefix(item.Code, "87") || strings.HasPrefix(item.Code, "88") ||
-					strings.HasPrefix(item.Code, "92") {
-					masterList = append(masterList, StockMaster{Code: "BJ" + item.Code, CodeName: item.Name})
-				}
+			if ex == protocol.ExchangeSH && (strings.HasPrefix(item.Code, "60") || strings.HasPrefix(item.Code, "68")) {
+				masterList = append(masterList, StockMaster{Code: "SH" + item.Code, CodeName: item.Name})
+			} else if ex == protocol.ExchangeSZ && (strings.HasPrefix(item.Code, "00") || strings.HasPrefix(item.Code, "30")) {
+				masterList = append(masterList, StockMaster{Code: "SZ" + item.Code, CodeName: item.Name})
+			} else if ex == protocol.ExchangeBJ && (strings.HasPrefix(item.Code, "43") || strings.HasPrefix(item.Code, "83") || strings.HasPrefix(item.Code, "87") || strings.HasPrefix(item.Code, "88") || strings.HasPrefix(item.Code, "92")) {
+				masterList = append(masterList, StockMaster{Code: "BJ" + item.Code, CodeName: item.Name})
 			}
 		}
 	}
-
 	file, _ := os.Create("stock_list.json")
 	defer file.Close()
 	json.NewEncoder(file).Encode(masterList)
@@ -81,7 +73,6 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 	rawCodes := strings.Split(codesStr, ",")
 	outFile, err := os.Create(outPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: 无法创建文件: %v\n", err)
 		os.Exit(3)
 	}
 	defer outFile.Close()
@@ -92,7 +83,6 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-
 	jobChan := make(chan string, len(rawCodes))
 	for _, c := range rawCodes {
 		jobChan <- strings.TrimSpace(c)
@@ -113,14 +103,12 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 			for tcode := range jobChan {
 				var allTrades protocol.Trades
 				start := 0
-
 				for {
 					resp, err := workerCli.GetHistoryTrade(dateStr, tcode, uint16(start), 2000)
 					if err != nil || resp == nil || len(resp.List) == 0 {
 						break
 					}
 					allTrades = append(allTrades, resp.List...)
-
 					if len(resp.List) < 2000 {
 						break
 					}
@@ -130,28 +118,88 @@ func runFetchTicks(codesStr, dateStr, outPath string) {
 					}
 				}
 
-				if len(allTrades) == 0 {
-					continue
-				}
-
 				var records [][]string
 				for _, t := range allTrades {
 					timeStr := t.Time.Format("15:04:05")
 					priceRaw := fmt.Sprintf("%v", t.Price)
-					priceClean := strings.ReplaceAll(priceRaw, "元", "")
-					priceClean = strings.TrimSpace(priceClean)
-
+					priceClean := strings.TrimSpace(strings.ReplaceAll(priceRaw, "元", ""))
 					records = append(records, []string{
-						tcode,
-						dateStr,
-						timeStr,
-						priceClean,
-						strconv.Itoa(int(t.Volume)),
-						strconv.Itoa(t.Status),
-						strconv.Itoa(t.Number),
+						tcode, dateStr, timeStr, priceClean,
+						strconv.Itoa(int(t.Volume)), strconv.Itoa(t.Status), strconv.Itoa(t.Number),
 					})
 				}
+				mu.Lock()
+				csvWriter.WriteAll(records)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+}
 
+// 🚀 新增：获取股票最近 100 天的日 K 线
+func runFetchKLine(codesStr, outPath string) {
+	rawCodes := strings.Split(codesStr, ",")
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		os.Exit(4)
+	}
+	defer outFile.Close()
+
+	csvWriter := csv.NewWriter(outFile)
+	defer csvWriter.Flush()
+	csvWriter.Write([]string{"code", "date", "open", "high", "low", "close", "volume", "amount"})
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	jobChan := make(chan string, len(rawCodes))
+	for _, c := range rawCodes {
+		jobChan <- strings.TrimSpace(c)
+	}
+	close(jobChan)
+
+	concurrency := 6
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			workerCli, err := tdx.DialDefault()
+			if err != nil {
+				return
+			}
+			defer workerCli.Close()
+
+			for tcode := range jobChan {
+				market := protocol.ExchangeSH
+				if strings.HasPrefix(tcode, "SZ") {
+					market = protocol.ExchangeSZ
+				} else if strings.HasPrefix(tcode, "BJ") {
+					market = protocol.ExchangeBJ
+				}
+				
+				// 提取去掉 SH/SZ 前缀的纯数字代码
+				codeNum := tcode
+				if len(tcode) > 2 {
+					codeNum = tcode[2:]
+				}
+
+				// 9 表示日线 (KLineDaily)
+				resp, err := workerCli.GetKLine(market, codeNum, 9, 0, 100)
+				if err != nil || resp == nil {
+					continue
+				}
+
+				var records [][]string
+				for _, k := range resp.List {
+					dateStr := k.Time.Format("20060102") // 格式化为 YYYYMMDD
+					records = append(records, []string{
+						tcode, dateStr,
+						fmt.Sprintf("%.2f", k.Open), fmt.Sprintf("%.2f", k.High),
+						fmt.Sprintf("%.2f", k.Low), fmt.Sprintf("%.2f", k.Close),
+						strconv.Itoa(int(k.Amount)), // 这里的 Amount 实际上是成交量(股)
+						fmt.Sprintf("%.2f", float64(k.Price)), // 这里的 Price 实际上是成交额(元)
+					})
+				}
 				mu.Lock()
 				csvWriter.WriteAll(records)
 				mu.Unlock()
