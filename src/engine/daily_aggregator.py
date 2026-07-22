@@ -1,3 +1,4 @@
+# FILE: src/engine/daily_aggregator.py
 import polars as pl
 import math
 
@@ -58,7 +59,8 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
     response_factor = math.exp(-price_response_norm)
     
     # 5. 绝对成交努力度因子 (Effort Factor)
-    effort_factor = min(daily_vol / (adv_20_pre + 1e-8), 3.0) / 3.0
+    # 🚀 物理单位对齐核心修复：历史滚动均量 adv_20_pre 单位为手，此处必须乘以 100.0 转换为股，拉齐日内 Tick 总成交量 daily_vol
+    effort_factor = min(daily_vol / (adv_20_pre * 100.0 + 1e-8), 3.0) / 3.0
     
     # 6. 方向偏好 (Aggression)
     buy_aggression = buy_vol_sum / (daily_vol + 1e-8)
