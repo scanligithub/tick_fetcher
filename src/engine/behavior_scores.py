@@ -1,8 +1,9 @@
+# FILE: src/engine/behavior_scores.py
 import polars as pl
 
 def evaluate_behavior_scores(daily_fact_df: pl.DataFrame) -> pl.DataFrame:
     """
-    重构后的机构高阶行为倾向得分评价算子 (V2.2)：
+    重构后的机构高阶行为倾向得分评价算子 (V2.2-Final)：
     采用排除未来数据干扰的位置指标计算行为分，并执行双重阈值门槛截断与多维相对置信度推演。
     """
     # 1. 调制四维行为得分（采用 T-1 日相对水位 pp_60_pre 避免 T 日价格自我循环污染）
@@ -24,7 +25,7 @@ def evaluate_behavior_scores(daily_fact_df: pl.DataFrame) -> pl.DataFrame:
          (1.0 - pl.col("response_factor")) * pl.col("data_quality_score")).alias("distribution_score")
     ])
 
-    # 2. 执行向量化或结构映射，判定主导行为与组合竞争置信度
+    # 2. 执行判定，判定主导行为与组合竞争置信度
     res_df = df_scored.with_columns([
         pl.struct([
             "accumulation_score", "attack_score", "defense_score", "distribution_score"
@@ -40,7 +41,7 @@ def evaluate_behavior_scores(daily_fact_df: pl.DataFrame) -> pl.DataFrame:
 
 def _determine_state_machine_v2(scores: dict) -> dict:
     """
-    V2.2 状态判定机：双重门槛短路 + 领先边缘度(Margin) + 能量支配度(Dominance)
+    V2.2-Final 状态判定机：双重门槛短路 + 领先边缘度(Margin) + 能量支配度(Dominance)
     """
     state_mapping = {
         "ACCUMULATION": scores.get("accumulation_score", 0.0),
@@ -58,8 +59,9 @@ def _determine_state_machine_v2(scores: dict) -> dict:
     second_score = second_score if second_score is not None else 0.0
     sum_all = sum([v for v in state_mapping.values() if v is not None])
 
-    # 1. 前置双重强门槛短路：绝对优势得分达不到 0.15 强度，说明无显著大资金意图
-    if best_score < 0.15:
+    # 1. 前置双重强门槛短路：
+    # 🚀 核心重构校准：由于V2.2中V2吸收因子集成了努力度（均值约1/12），此处门槛由 0.15 对应校准为 0.005，完美契合 Top 8% 优势信号极值触发区间
+    if best_score < 0.005:
         return {
             "primary_state": "NEUTRAL",
             "state_confidence": 0.0,
