@@ -1,3 +1,4 @@
+# FILE: src/pipeline/factor_audit.py
 import os
 import glob
 import polars as pl
@@ -149,6 +150,83 @@ def run_case_studies(df: pl.DataFrame):
 
     print("="*80 + "\n")
 
+def run_score_decomposition_audit(df: pl.DataFrame):
+    """
+    🚀 V2.2-Final 核心设计：得分分量分解审计
+    在不改动底层数据Schema的情况下，动态拆解每个行为得分的各组成物理乘数，揪出将股票推过起评分的“幕后元凶”。
+    """
+    print("\n" + "="*80)
+    print("      📊  PART 4: 得分分量分解审计 (Score Component Decomposition Audit)      ")
+    print("="*80)
+    
+    # 在内存中计算出各个高阶乘数的物理分量
+    df_decomp = df.with_columns([
+        # 建仓得分的分量
+        (1.0 - pl.col("pp_60_pre")).alias("acc_pos_factor"),
+        (1.0 + pl.col("rs_5_pre").clip(0.0, 1.0)).alias("acc_rs_factor"),
+        # 防御得分的分量
+        (1.0 - pl.col("pp_20_pre")).alias("def_pos_factor"),
+        (1.0 - pl.col("bias_20_pre").clip(-1.0, 0.0)).alias("def_bias_factor")
+    ])
+    
+    decomp_cols = {
+        "ACC_Absorption (Buy V2)": "buy_absorption_v2",
+        "ACC_Position Factor (1-PP60)": "acc_pos_factor",
+        "ACC_Excess Return (1+RS5)": "acc_rs_factor",
+        "DEF_Absorption (Sell V2)": "sell_absorption_v2",
+        "DEF_Position Factor (1-PP20)": "def_pos_factor",
+        "DEF_Bias Factor (1-Bias20)": "def_bias_factor",
+        "Data Quality Score": "data_quality_score"
+    }
+    
+    # 1. 打印各子分量的截面分布分位数，定位整体膨胀分量
+    header = f"{'Constituent Factor Name':<28} | {'Min':<8} | {'P25%':<8} | {'P50%':<8} | {'P75%':<8} | {'P95%':<8} | {'Max':<8}"
+    print(header)
+    print("-" * len(header))
+    for name, col in decomp_cols.items():
+        if col not in df_decomp.columns:
+            continue
+        series = df_decomp[col].drop_nulls()
+        print(f"{name:<28} | {series.min():>8.4f} | {series.quantile(0.25):>8.4f} | {series.quantile(0.50):>8.4f} | {series.quantile(0.75):>8.4f} | {series.quantile(0.95):>8.4f} | {series.max():>8.4f}")
+    
+    # 2. 打印触发起评分门槛 (score >= 0.005) 的代表性个股分量拆解 (Top 15)
+    print("\n🔥 触发高起评分 (score >= 0.005) 的代表性个股分量拆解 (Top 15):")
+    high_scores_df = df_decomp.filter(
+        (pl.col("accumulation_score") >= 0.005) | (pl.col("defense_score") >= 0.005)
+    ).sort("state_confidence", descending=True).head(15)
+    
+    if high_scores_df.is_empty():
+        print("   (本日无满足 >= 0.005 起评分的激活个股)")
+    else:
+        detail_header = f"{'Code':<9} | {'State':<12} | {'Raw Score':<9} | {'Absorption':<10} | {'Pos Factor':<10} | {'Resp/Bias':<10} | {'Quality':<8} | {'Confidence':<10}"
+        print(detail_header)
+        print("-" * len(detail_header))
+        for r in high_scores_df.iter_rows(named=True):
+            state = r["primary_state"]
+            if state == "ACCUMULATION":
+                raw_score = r["accumulation_score"]
+                absorption = r["buy_absorption_v2"]
+                pos_factor = r["acc_pos_factor"]
+                resp_bias = r["acc_rs_factor"]
+            elif state == "DEFENSE":
+                raw_score = r["defense_score"]
+                absorption = r["sell_absorption_v2"]
+                pos_factor = r["def_pos_factor"]
+                resp_bias = r["def_bias_factor"]
+            elif state == "DISTRIBUTION":
+                raw_score = r["distribution_score"]
+                absorption = r["buy_absorption_v2"]
+                pos_factor = r["pp_60_pre"]
+                resp_bias = 1.0 - r["response_factor"]
+            else:
+                raw_score = 0.0
+                absorption = 0.0
+                pos_factor = 0.0
+                resp_bias = 0.0
+            
+            print(f"{r['code']:<9} | {state:<12} | {raw_score:>9.4f} | {absorption:>10.4f} | {pos_factor:>10.4f} | {resp_bias:>10.4f} | {r['data_quality_score']:>8.4f} | {r['state_confidence']:>10.4f}")
+    print("="*80)
+
 def main():
     target_file = find_latest_factor_file()
     if not target_file:
@@ -162,6 +240,7 @@ def main():
     run_distribution_audit(df)
     run_state_machine_audit(df)
     run_case_studies(df)
+    run_score_decomposition_audit(df) # 启动高阶分量分解审计
 
 if __name__ == "__main__":
     main()
