@@ -32,6 +32,10 @@ jobs:
           cd src/go_fetcher
           go get github.com/injoyai/tdx@master
           go mod tidy
+          
+      - name: 🔍 Run Physical Sanity Check (Data Sanity Verification)
+        run: |
+          python src/pipeline/data_sanity_check.py
 
       - name: 🚀 Execute High-Performance Pipeline
         run: |
