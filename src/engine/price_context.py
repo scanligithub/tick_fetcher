@@ -1,3 +1,4 @@
+# FILE: src/engine/price_context.py
 import polars as pl
 
 def calculate_price_context(kline_csv_path: str) -> pl.DataFrame:
@@ -5,9 +6,10 @@ def calculate_price_context(kline_csv_path: str) -> pl.DataFrame:
     读取日线K线，计算严格的 T-1 历史上下文指标（通过 .shift(1) 物理隔离避免同日污染）。
     """
     try:
+        # 消除过时警告：使用 schema_overrides 替代 dtypes
         df = pl.read_csv(
             kline_csv_path,
-            dtypes={
+            schema_overrides={
                 "code": pl.String,
                 "date": pl.String,
                 "open": pl.Float64,
@@ -30,14 +32,14 @@ def calculate_price_context(kline_csv_path: str) -> pl.DataFrame:
         # 按股票和日期排序，确保滚动计算的时序正确
         df = df.sort(["code", "date"])
 
-        # 1. 计算日线级基础指标
+        # 1. 计算日线级基础指标 (V2.2 严格语义：低点算 rolling_min, 高点算 rolling_max)
         df = df.with_columns([
             pl.col("volume").rolling_mean(window_size=20).over("code").alias("adv_20"),
             (pl.col("high") - pl.col("low")).rolling_mean(window_size=10).over("code").alias("atr_10"),
-            pl.col("close").rolling_min(window_size=20).over("code").alias("low_20"),
-            pl.col("close").rolling_max(window_size=20).over("code").alias("high_20"),
-            pl.col("close").rolling_min(window_size=60).over("code").alias("low_60"),
-            pl.col("close").rolling_max(window_size=60).over("code").alias("high_60"),
+            pl.col("low").rolling_min(window_size=20).over("code").alias("low_20"),
+            pl.col("high").rolling_max(window_size=20).over("code").alias("high_20"),
+            pl.col("low").rolling_min(window_size=60).over("code").alias("low_60"),
+            pl.col("high").rolling_max(window_size=60).over("code").alias("high_60"),
             pl.col("close").rolling_mean(window_size=20).over("code").alias("ma20")
         ])
 
