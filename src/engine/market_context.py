@@ -1,9 +1,10 @@
 import polars as pl
 
 def calculate_market_relative_strength(kline_csv_path: str, index_csv_path: str) -> pl.DataFrame:
-    """计算个股相对大盘(上证指数)的真实 5 日超额收益率 (RS_5)"""
+    """
+    计算截至 T-1 日，个股相对于大盘的 5 日超额历史收益率 (RS_5_PRE)。
+    """
     try:
-        # 强制声明 Dtypes
         kline_dtypes = {
             "code": pl.String, "date": pl.String,
             "open": pl.Float64, "high": pl.Float64, "low": pl.Float64, "close": pl.Float64,
@@ -19,22 +20,33 @@ def calculate_market_relative_strength(kline_csv_path: str, index_csv_path: str)
         return pl.DataFrame()
 
     try:
-        # 1. 股票分组使用 .last() 是完全合法的
+        # 1. 计算个股 5 日历史回报率，并向后 shift 一日
         stock_df = stock_df.sort(["code", "date"]).with_columns([
             (pl.col("close") / pl.col("close").shift(5).over("code") - 1.0).alias("stock_ret_5")
-        ]).group_by("code").last().select(["code", "stock_ret_5"])
+        ]).with_columns([
+            pl.col("stock_ret_5").shift(1).over("code").alias("stock_ret_5_pre")
+        ])
 
-        # 2. 🚀 核心修复：普通 DataFrame 没有 .last() 方法，修正为标准的 .tail(1)
+        # 2. 计算大盘 5 日历史回报率，并向后 shift 一日
         index_df = index_df.sort("date").with_columns([
             (pl.col("close") / pl.col("close").shift(5) - 1.0).alias("idx_ret_5")
-        ]).tail(1)
-        
-        idx_ret = float(index_df["idx_ret_5"][0]) if not index_df.is_empty() and index_df["idx_ret_5"][0] is not None else 0.0
-
-        res = stock_df.with_columns([
-            (pl.col("stock_ret_5") - idx_ret).fill_null(0.0).alias("rs_5")
+        ]).with_columns([
+            pl.col("idx_ret_5").shift(1).alias("idx_ret_5_pre")
         ])
-        return res.select(["code", "rs_5"])
+
+        # 3. 提取大盘最新一行的 T-1 历史指标值
+        latest_index = index_df.tail(1)
+        if latest_index.is_empty():
+            idx_ret_pre = 0.0
+        else:
+            idx_ret_pre = float(latest_index["idx_ret_5_pre"][0]) if latest_index["idx_ret_5_pre"][0] is not None else 0.0
+
+        # 4. 计算个股截至昨日收盘的超额回报
+        res = stock_df.group_by("code").last().with_columns([
+            (pl.col("stock_ret_5_pre") - idx_ret_pre).fill_null(0.0).alias("rs_5_pre")
+        ])
+        
+        return res.select(["code", "rs_5_pre"])
     except Exception as e:
         print(f"❌ [RS Context] 相对强弱计算过程异常: {e}", flush=True)
         return pl.DataFrame()
