@@ -8,6 +8,7 @@ import time
 import requests
 
 def get_beijing_time_date() -> str:
+    """默认按真实北京时间推导最近一个已收盘交易日"""
     try:
         resp = requests.head("https://www.baidu.com", timeout=3)
         if resp.status_code == 200 and "Date" in resp.headers:
@@ -28,8 +29,23 @@ def get_beijing_time_date() -> str:
 
     return time.strftime("%Y%m%d", bj_time)
 
+def resolve_target_date() -> str:
+    """优先读取环境变量 TARGET_DATE 或命令行参数，无指定则动态推导"""
+    env_date = os.environ.get("TARGET_DATE", "").strip()
+    if env_date and len(env_date) == 8 and env_date.isdigit():
+        print(f"🎯 [Sanity Check] 使用手动指定的历史目标交易日: {env_date}", flush=True)
+        return env_date
+
+    if len(sys.argv) > 1 and len(sys.argv[1]) == 8 and sys.argv[1].isdigit():
+        print(f"🎯 [Sanity Check] 使用命令行指定的历史目标交易日: {sys.argv[1]}", flush=True)
+        return sys.argv[1]
+
+    auto_date = get_beijing_time_date()
+    print(f"📅 [Sanity Check] 自动推导目标交易日: {auto_date}", flush=True)
+    return auto_date
+
 def compile_core():
-    print("🛠  正在编译高性能 Go 核心提取网关...", flush=True)
+    print("🛠️  正在编译高性能 Go 核心提取网关...", flush=True)
     root_dir = os.getcwd()
     go_dir = os.path.join(root_dir, "src", "go_fetcher")
     out_path = os.path.join(root_dir, "fetcher_core")
@@ -63,8 +79,10 @@ def run_physical_sanity_check(code: str, date_str: str):
     ], capture_output=True)
 
     if not os.path.exists(tick_csv) or os.path.getsize(tick_csv) < 100:
+        print(f"⚠️  未拉取到标的 [{code}] 在 [{date_str}] 的有效 Tick 数据")
         return
     if not os.path.exists(kline_csv) or os.path.getsize(kline_csv) < 100:
+        print(f"⚠️  未拉取到标的 [{code}] 的有效 K 线数据")
         return
 
     try:
@@ -210,7 +228,7 @@ def run_physical_sanity_check(code: str, date_str: str):
 def main():
     os.makedirs("data/temp_chunks", exist_ok=True)
     compile_core()
-    target_date = get_beijing_time_date()
+    target_date = resolve_target_date()
     test_stocks = ["SZ000001", "SH600000"]
     for code in test_stocks:
         run_physical_sanity_check(code, target_date)
