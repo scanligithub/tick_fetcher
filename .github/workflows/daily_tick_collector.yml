@@ -49,10 +49,6 @@ jobs:
         run: |
           python src/pipeline/semantic_state_audit.py
 
-      - name: 🔬 Run Semantic State Audit (PART 0 - PART 4)
-        run: |
-          python src/pipeline/semantic_state_audit.py
-
       - name: 📈 Run Forward Alpha & Rank IC Validation (新增 Alpha 收益验证)
         run: |
           python src/pipeline/run_alpha_validation.py
