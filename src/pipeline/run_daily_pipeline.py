@@ -25,6 +25,39 @@ def load_configs():
         factors = yaml.safe_load(f)
     return settings, factors
 
+def resolve_target_date() -> str:
+    """优先读取环境变量 TARGET_DATE 或命令行参数，无指定则动态推导最新交易日"""
+    env_date = os.environ.get("TARGET_DATE", "").strip()
+    if env_date and len(env_date) == 8 and env_date.isdigit():
+        print(f"🎯 [Workflow Input] 使用手动指定的历史目标交易日: {env_date}", flush=True)
+        return env_date
+
+    if len(sys.argv) > 1 and len(sys.argv[1]) == 8 and sys.argv[1].isdigit():
+        print(f"🎯 [CLI Input] 使用命令行指定的历史目标交易日: {sys.argv[1]}", flush=True)
+        return sys.argv[1]
+
+    import requests
+    try:
+        resp = requests.head("https://www.baidu.com", timeout=3)
+        bj_time_struct = time.strptime(resp.headers["Date"], "%a, %d %b %Y %H:%M:%S GMT")
+        bj_timestamp = time.mktime(bj_time_struct) + 8 * 3600
+        bj_time = time.localtime(bj_timestamp)
+    except Exception:
+        bj_time = time.localtime()
+
+    bj_timestamp = time.mktime(bj_time)
+    if bj_time.tm_hour < 16:
+        bj_timestamp -= 24 * 3600
+        bj_time = time.localtime(bj_timestamp)
+
+    while bj_time.tm_wday >= 5:
+        bj_timestamp -= 24 * 3600
+        bj_time = time.localtime(bj_timestamp)
+
+    auto_date = time.strftime("%Y%m%d", bj_time)
+    print(f"📅 [Auto Derived] 本日行为特征结算目标交易日: {auto_date}", flush=True)
+    return auto_date
+
 def compile_go_core():
     print("🛠️  正在编译高性能 Go 核心网关...", flush=True)
     root_dir = os.getcwd()
@@ -77,7 +110,7 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
     # 3. 运行清洗与历史上下文对齐
     raw_df = clean_raw_ticks(tick_csv)
     
-    # 计算 T-1 静态历史状态指标 (物理隔離)
+    # 计算 T-1 静态历史状态指标 (物理隔离)
     price_ctx_df = calculate_price_context(kline_csv)
     market_ctx_df = calculate_market_relative_strength(kline_csv, index_csv)
     
@@ -88,7 +121,6 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
     if not market_ctx_df.is_empty():
         real_context_df = real_context_df.join(market_ctx_df, on="code", how="left")
         
-    # 🚀 闸门2：定义缺失特征的前置回退默认值（补充三个新增字段，防范左连接空值）
     fallback_map = {
         "adv_20_pre": 1000000.0,
         "atr_10_pre": 0.1,
@@ -179,23 +211,8 @@ def main():
         print("⚠️ 【警告】运行处于测试模式，将仅测试少量个股。", flush=True)
         codes = settings.get("test_stocks", ["SZ000001", "SH600519"])
         
-    # 2. 定位结算日期（避开非交易日及交易时段）
-    import requests
-    resp = requests.head("https://www.baidu.com")
-    bj_time_struct = time.strptime(resp.headers["Date"], "%a, %d %b %Y %H:%M:%S GMT")
-    bj_timestamp = time.mktime(bj_time_struct) + 8 * 3600
-    bj_time = time.localtime(bj_timestamp)
-
-    if bj_time.tm_hour < 16:
-        bj_timestamp -= 24 * 3600
-        bj_time = time.localtime(bj_timestamp)
-
-    while bj_time.tm_wday >= 5:
-        bj_timestamp -= 24 * 3600
-        bj_time = time.localtime(bj_timestamp)
-
-    date_str = time.strftime("%Y%m%d", bj_time)
-    print(f"📅 本日行为特征结算目标交易日: {date_str}", flush=True)
+    # 2. 解析交易日期（优先读取 Workflow 环境变量）
+    date_str = resolve_target_date()
     
     chunk_size = settings.get("chunk_size", 500)
     chunks = [codes[i:i + chunk_size] for i in range(0, len(codes), chunk_size)]
@@ -203,7 +220,7 @@ def main():
     # 3. 启动多线程调度
     daily_results = []
     concurrency = settings.get("concurrency", 4)
-    print(f"🔥 正在启动并发特征调制管道 [并发数={concurrency} | 总任务片={len(chunks)}]...", flush=True)
+    print(f"🔥 正在启动并发特征调制管道 [目标日期={date_str} | 并发数={concurrency} | 总任务片={len(chunks)}]...", flush=True)
     
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = []
@@ -223,7 +240,7 @@ def main():
     print("🧠 正在进行多维状态机概率调制与置信度校准...", flush=True)
     output_df = evaluate_behavior_scores(final_fact_df)
     
-    # 5. ZSTD物理压缩落盘
+    # 5. ZSTD 物理压缩落盘
     out_file = f"data/output/factors_{date_str}.parquet"
     output_df.write_parquet(out_file, compression="zstd")
     print(f"🏁 日级行为因子的特征宽表已安全落盘: {out_file}", flush=True)
