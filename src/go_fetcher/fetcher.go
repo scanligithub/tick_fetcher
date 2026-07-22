@@ -1,3 +1,4 @@
+// FILE: src/go_fetcher/fetcher.go
 package main
 
 import (
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/injoyai/tdx"
 	"github.com/injoyai/tdx/protocol"
@@ -159,6 +161,9 @@ func runFetchKLine(codesStr, outPath string) {
 	}
 	close(jobChan)
 
+	// 强制设定北京时区，切断 Actions Runner 默认 UTC 带来的日期回退污染
+	shanghai := time.FixedZone("CST", 8*3600)
+
 	concurrency := 6
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -190,12 +195,14 @@ func runFetchKLine(codesStr, outPath string) {
 
 				var records [][]string
 				for _, k := range resp.List {
-					dateStr := k.Time.Format("20060102") 
-					// 🚀 黄金终极修复：对 k.Open, k.High, k.Low, k.Close 显式强转为 float64，彻底驱逐 %!f 格式化噪音
+					// 强制在 CST 时区下格式化 K 线日期
+					dateStr := k.Time.In(shanghai).Format("20060102") 
+					
+					// 🚀 核心修复：对 K 线的原始价格字段进行除以 1000.0 的物理缩放，在最上游统一转化为标准“元”单位
 					records = append(records, []string{
 						tcode, dateStr,
-						fmt.Sprintf("%.2f", float64(k.Open)), fmt.Sprintf("%.2f", float64(k.High)),
-						fmt.Sprintf("%.2f", float64(k.Low)), fmt.Sprintf("%.2f", float64(k.Close)),
+						fmt.Sprintf("%.3f", float64(k.Open)/1000.0), fmt.Sprintf("%.3f", float64(k.High)/1000.0),
+						fmt.Sprintf("%.3f", float64(k.Low)/1000.0), fmt.Sprintf("%.3f", float64(k.Close)/1000.0),
 						fmt.Sprintf("%.0f", float64(k.Volume)), 
 						fmt.Sprintf("%.2f", float64(k.Amount)), 
 					})
