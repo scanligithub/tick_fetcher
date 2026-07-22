@@ -19,6 +19,14 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
     low_60_pre = float(history_ctx.get("low_60_pre", 1.0))
     high_60_pre = float(history_ctx.get("high_60_pre", 1.0))
     
+    # V2.2-Final 导入的 K线 纯净计算变量
+    price_return_t = float(history_ctx.get("daily_return", 0.0))
+    atr_pct_10_pre = float(history_ctx.get("atr_pct_10_pre", 0.002))
+    effective_range_60_pre = float(history_ctx.get("effective_range_60_pre", 0.01))
+    
+    # 昨收价 (K 线复权价格)
+    close_pre_val = float(history_ctx.get("close_pre", 1.0))
+    
     # 1. 基础物理事实统计
     daily_vol = float(aligned_min_df["volume_sum"].sum())
     daily_amt = float(aligned_min_df["volume_sum"].sum() * aligned_min_df["vwap"].mean())
@@ -42,24 +50,12 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
         dq_weights.get("non_empty_ratio", 0.3) * (1.0 - empty_ratio)
     )
     
-    # 4. 单位对齐的价格响应标准化与响应因子计算 (T日 Close 相对于昨收)
-    close_t = float(aligned_min_df["close"].last())
-    prev_close = float(history_ctx.get("close_pre", close_t))
-    if prev_close <= 0:
-        prev_close = close_t
-        
-    price_return_t = (close_t / prev_close - 1.0)
-    
-    # 将绝对价差 ATR 转化为百分比波动率尺度
-    atr_pct_10 = atr_10_pre / (prev_close + 1e-8)
-    
-    # 日价格响应归一化
-    price_response_norm = abs(price_return_t) / (atr_pct_10 + 1e-8)
-    # 利用指数衰减公式计算价格响应因子，实现高价格变动对吸收强度的非线性惩罚
+    # 4. 价格响应标准化与响应因子计算（使用 K 线日线收益率和 ATR_PCT Floor）
+    price_response_norm = abs(price_return_t) / (atr_pct_10_pre + 1e-8)
     response_factor = math.exp(-price_response_norm)
     
     # 5. 绝对成交努力度因子 (Effort Factor)
-    # 物理单位对齐核心修复：历史滚动均量 adv_20_pre 单位为手，此处乘以 100.0 转换为股，拉齐日内 Tick 总成交量 daily_vol
+    # 历史滚动均量 adv_20_pre 单位为手，此处乘以 100.0 转换为股，拉齐日内 Tick 总成交量 daily_vol
     effort_factor = min(daily_vol / (adv_20_pre * 100.0 + 1e-8), 3.0) / 3.0
     
     # 6. 方向偏好 (Aggression)
@@ -75,19 +71,19 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
     buy_absorption_v2 = buy_absorption_v1 * effort_factor * dq_score
     sell_absorption_v2 = sell_absorption_v1 * effort_factor * dq_score
     
-    # 8. 价格区间穿透与双向突破特征计算 (均排除T日数据对最高最低区间的污染)
-    # 🚀 极值防除零重构：建立最低有效价格波动尺度（昨收的 0.5%），防止僵尸股/停牌股滚动区间为0导致的极值爆炸
-    range_60 = high_60_pre - low_60_pre
-    effective_range = max(range_60, prev_close * 0.005)
-    pp_60_close = (close_t - low_60_pre) / (effective_range + 1e-8)
+    # 8. 🚀 核心架构重构：利用纯净的 K 线收益率重构处于同一复权价格空间下的 T 日虚拟收盘价，消灭跨量纲减法
+    close_t_adjusted = close_pre_val * (1.0 + price_return_t)
     
-    # 向上突破（加入裁剪保护，防范历史K线异常脏数据）
-    breakout_60 = (close_t / (high_60_pre + 1e-8)) - 1.0
+    # 9. 位置与双向突破特征计算 (在复权空间内进行)
+    pp_60_close = (close_t_adjusted - low_60_pre) / (effective_range_60_pre + 1e-8)
+    
+    # 向上突破（裁剪溢出，拦截脏数据）
+    breakout_60 = (close_t_adjusted / (high_60_pre + 1e-8)) - 1.0
     breakout_60 = max(min(breakout_60, 1.0), -1.0)
     breakout_60_flag = 1.0 if breakout_60 > 0.0 else 0.0
     
-    # 向下跌破
-    breakdown_60 = (close_t / (low_60_pre + 1e-8)) - 1.0
+    # 向下跌破（严格对称跌破定义，破位后返回负值，未破位返回正值）
+    breakdown_60 = (close_t_adjusted / (low_60_pre + 1e-8)) - 1.0
     breakdown_60 = max(min(breakdown_60, 1.0), -1.0)
     breakdown_60_flag = 1.0 if breakdown_60 < 0.0 else 0.0
     
@@ -116,7 +112,7 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
         "buy_persistence": [buy_persistence],
         "sell_persistence": [sell_persistence],
         "price_return_t": [price_return_t],
-        "atr_pct_10": [atr_pct_10],
+        "atr_pct_10": [atr_pct_10_pre],
         "price_response_norm": [price_response_norm],
         "response_factor": [response_factor],
         "effort_factor": [effort_factor],
