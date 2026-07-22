@@ -4,7 +4,7 @@ import math
 
 def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights, history_ctx: dict):
     """
-    日级微观行为物理特征重构算子 (V2.2)：
+    日级微观行为物理特征重构算子 (V2.2-Final)：
     结合历史上下文，推导标准化的努力-结果背离因子、双向突破特征，并同时输出 V1/V2 版本的吸收指标。
     """
     if aligned_min_df.is_empty():
@@ -59,7 +59,7 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
     response_factor = math.exp(-price_response_norm)
     
     # 5. 绝对成交努力度因子 (Effort Factor)
-    # 🚀 物理单位对齐核心修复：历史滚动均量 adv_20_pre 单位为手，此处必须乘以 100.0 转换为股，拉齐日内 Tick 总成交量 daily_vol
+    # 物理单位对齐核心修复：历史滚动均量 adv_20_pre 单位为手，此处乘以 100.0 转换为股，拉齐日内 Tick 总成交量 daily_vol
     effort_factor = min(daily_vol / (adv_20_pre * 100.0 + 1e-8), 3.0) / 3.0
     
     # 6. 方向偏好 (Aggression)
@@ -76,14 +76,19 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
     sell_absorption_v2 = sell_absorption_v1 * effort_factor * dq_score
     
     # 8. 价格区间穿透与双向突破特征计算 (均排除T日数据对最高最低区间的污染)
-    pp_60_close = (close_t - low_60_pre) / (high_60_pre - low_60_pre + 1e-8)
+    # 🚀 极值防除零重构：建立最低有效价格波动尺度（昨收的 0.5%），防止僵尸股/停牌股滚动区间为0导致的极值爆炸
+    range_60 = high_60_pre - low_60_pre
+    effective_range = max(range_60, prev_close * 0.005)
+    pp_60_close = (close_t - low_60_pre) / (effective_range + 1e-8)
     
-    # 向上突破
+    # 向上突破（加入裁剪保护，防范历史K线异常脏数据）
     breakout_60 = (close_t / (high_60_pre + 1e-8)) - 1.0
+    breakout_60 = max(min(breakout_60, 1.0), -1.0)
     breakout_60_flag = 1.0 if breakout_60 > 0.0 else 0.0
     
     # 向下跌破
     breakdown_60 = (close_t / (low_60_pre + 1e-8)) - 1.0
+    breakdown_60 = max(min(breakdown_60, 1.0), -1.0)
     breakdown_60_flag = 1.0 if breakdown_60 < 0.0 else 0.0
     
     # 保留统计分位数
