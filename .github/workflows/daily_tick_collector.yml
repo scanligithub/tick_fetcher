@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '30 8 * * 1-5'
   workflow_dispatch:
+    inputs:
+      target_date:
+        description: '指定调制的历史交易日 (格式: YYYYMMDD，如 20260604。留空则默认自动推导最新收盘日)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -33,11 +38,15 @@ jobs:
           go get github.com/injoyai/tdx@master
           go mod tidy
           
-      - name: 🔍 Run Physical Sanity Check (Data Sanity Verification)
+      - name: 🔍 Run Physical Sanity Check
+        env:
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
         run: |
           python src/pipeline/data_sanity_check.py
 
       - name: 🚀 Execute High-Performance Pipeline
+        env:
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
         run: |
           python src/pipeline/run_daily_pipeline.py
 
@@ -49,16 +58,9 @@ jobs:
         run: |
           python src/pipeline/semantic_state_audit.py
 
-      - name: 📈 Run Forward Alpha & Rank IC Validation (新增 Alpha 收益验证)
+      - name: 📈 Run Forward Alpha & Rank IC Validation
         run: |
           python src/pipeline/run_alpha_validation.py
-
-      - name: 📤 Upload Captured Compressed Parquet Factors
-        uses: actions/upload-artifact@v4
-        with:
-          name: tdx-high-freq-behavior-factors
-          path: data/output/*.parquet
-          retention-days: 7
 
       - name: 📤 Upload Captured Compressed Parquet Factors
         uses: actions/upload-artifact@v4
