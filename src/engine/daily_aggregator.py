@@ -13,19 +13,22 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
     code = aligned_min_df["code"][0]
     date = aligned_min_df["trade_date"][0]
     
-    # 获取 T-1 日的历史静态上下文特征
-    atr_10_pre = float(history_ctx.get("atr_10_pre", 0.1))
-    adv_20_pre = float(history_ctx.get("adv_20_pre", 1000000.0))
-    low_60_pre = float(history_ctx.get("low_60_pre", 1.0))
-    high_60_pre = float(history_ctx.get("high_60_pre", 1.0))
+    # 🚀 闸门1：双重防御性提取，对任何可能由于左连接产生的 None 类型进行物理隔离，拦截崩溃
+    atr_10_pre = float(history_ctx.get("atr_10_pre") if history_ctx.get("atr_10_pre") is not None else 0.1)
+    adv_20_pre = float(history_ctx.get("adv_20_pre") if history_ctx.get("adv_20_pre") is not None else 1000000.0)
+    low_60_pre = float(history_ctx.get("low_60_pre") if history_ctx.get("low_60_pre") is not None else 1.0)
+    high_60_pre = float(history_ctx.get("high_60_pre") if history_ctx.get("high_60_pre") is not None else 1.0)
     
-    # V2.2-Final 导入的 K线 纯净计算变量
-    price_return_t = float(history_ctx.get("daily_return", 0.0))
-    atr_pct_10_pre = float(history_ctx.get("atr_pct_10_pre", 0.002))
-    effective_range_60_pre = float(history_ctx.get("effective_range_60_pre", 0.01))
+    # V2.2-Final 导入的 K线 纯净计算变量 (安全强转)
+    raw_return = history_ctx.get("daily_return")
+    price_return_t = float(raw_return) if raw_return is not None else 0.0
+    
+    atr_pct_10_pre = float(history_ctx.get("atr_pct_10_pre") if history_ctx.get("atr_pct_10_pre") is not None else 0.002)
+    effective_range_60_pre = float(history_ctx.get("effective_range_60_pre") if history_ctx.get("effective_range_60_pre") is not None else 0.01)
     
     # 昨收价 (K 线复权价格)
-    close_pre_val = float(history_ctx.get("close_pre", 1.0))
+    raw_close_pre = history_ctx.get("close_pre")
+    close_pre_val = float(raw_close_pre) if raw_close_pre is not None else float(aligned_min_df["close"].last())
     
     # 1. 基础物理事实统计
     daily_vol = float(aligned_min_df["volume_sum"].sum())
@@ -55,7 +58,7 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
     response_factor = math.exp(-price_response_norm)
     
     # 5. 绝对成交努力度因子 (Effort Factor)
-    # 历史滚动均量 adv_20_pre 单位为手，此处乘以 100.0 转换为股，拉齐日内 Tick 总成交量 daily_vol
+    # 物理单位对齐核心修复：历史滚动均量 adv_20_pre 单位为手，此处乘以 100.0 转换为股，拉齐日内 Tick 总成交量 daily_vol
     effort_factor = min(daily_vol / (adv_20_pre * 100.0 + 1e-8), 3.0) / 3.0
     
     # 6. 方向偏好 (Aggression)
@@ -71,7 +74,7 @@ def aggregate_to_daily_row(aligned_min_df, limit_dict, auction_dict, dq_weights,
     buy_absorption_v2 = buy_absorption_v1 * effort_factor * dq_score
     sell_absorption_v2 = sell_absorption_v1 * effort_factor * dq_score
     
-    # 8. 🚀 核心架构重构：利用纯净的 K 线收益率重构处于同一复权价格空间下的 T 日虚拟收盘价，消灭跨量纲减法
+    # 8. 核心价格重置：利用纯净的 K 线收益率重构处于同一复权价格空间下的 T 日虚拟收盘价，消灭跨量纲减法
     close_t_adjusted = close_pre_val * (1.0 + price_return_t)
     
     # 9. 位置与双向突破特征计算 (在复权空间内进行)
