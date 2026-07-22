@@ -5,13 +5,11 @@ import glob
 import subprocess
 import polars as pl
 
-def find_latest_factor_file(output_dir="data/output") -> str | None:
-    """搜寻最新落盘的日级因子 Parquet 文件"""
+def find_factor_files(output_dir="data/output") -> list[str]:
+    """搜寻 data/output 目录下所有的日级因子 Parquet 文件"""
     pattern = os.path.join(output_dir, "factors_*.parquet")
     files = glob.glob(pattern)
-    if not files:
-        return None
-    return max(files, key=os.path.basename)
+    return sorted(files)
 
 def ensure_fetcher_core():
     """确保 Go 内核可执行文件存在，若不存在则动态编译"""
@@ -30,7 +28,7 @@ def ensure_fetcher_core():
 
 def fetch_forward_klines(codes: list[str], kline_out_csv: str):
     """通过 Go 内核批量拉取最新 K 线数据以推导 Forward Returns"""
-    print(f"📈 [GHA Environment] 正在为 {len(codes)} 只标的拉取历史与未来 K 线数据...", flush=True)
+    print(f"📈 [GHA Environment] 正在为 {len(codes)} 只标的拉取历史与最新日 K 线...", flush=True)
     codes_str = ",".join(codes)
     cmd = ["./fetcher_core", "-mode=kline", f"-codes={codes_str}", f"-out={kline_out_csv}"]
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -47,14 +45,16 @@ def append_to_github_summary(markdown_text: str):
         except Exception as e:
             print(f"⚠️ 写入 GITHUB_STEP_SUMMARY 失败: {e}")
 
-def calculate_forward_returns(factor_df: pl.DataFrame, kline_csv: str) -> pl.DataFrame:
+def calculate_forward_returns_with_guard(factor_df: pl.DataFrame, kline_csv: str) -> tuple[pl.DataFrame, str]:
     """
-    向量化推导 T+1, T+2, T+3, T+5, T+10 的未来真实收益率 (Forward Returns)
-    利用 Polars .shift(-k).over("code") 彻底切断未来函数污染
+    带严格时间轴防线的 Forward Returns 计算算子：
+    1. 检查最新 K 线收盘日期 latest_kline_date。
+    2. 针对每一个 factor_date_T，仅当未来第 k 个交易日实际存在且 date_Tk <= latest_kline_date 时才计算收益。
+    3. 未到期的未来收益（如昨日因子的 T+3/T+5）强行置为 None (Null)，杜绝虚假未来收益！
     """
     if not os.path.exists(kline_csv) or os.path.getsize(kline_csv) < 100:
         print("⚠️ 警告: K线数据文件为空，无法计算 Forward Returns。")
-        return factor_df
+        return factor_df, "N/A"
 
     kline_df = pl.read_csv(
         kline_csv,
@@ -66,27 +66,47 @@ def calculate_forward_returns(factor_df: pl.DataFrame, kline_csv: str) -> pl.Dat
     )
 
     if kline_df.is_empty():
-        return factor_df
+        return factor_df, "N/A"
 
-    # 按代码和日期升序排列，向未来 shift 计算收益
+    latest_kline_date = kline_df["date"].max()
+
+    # 按代码与日期升序排序，向未来 shift 交易日
     kline_df = kline_df.sort(["code", "date"]).with_columns([
-        ((pl.col("close").shift(-1).over("code") / pl.col("close")) - 1.0).alias("fwd_ret_t1"),
-        ((pl.col("close").shift(-2).over("code") / pl.col("close")) - 1.0).alias("fwd_ret_t2"),
-        ((pl.col("close").shift(-3).over("code") / pl.col("close")) - 1.0).alias("fwd_ret_t3"),
-        ((pl.col("close").shift(-5).over("code") / pl.col("close")) - 1.0).alias("fwd_ret_t5"),
-        ((pl.col("close").shift(-10).over("code") / pl.col("close")) - 1.0).alias("fwd_ret_t10"),
+        pl.col("close").shift(-1).over("code").alias("close_t1"),
+        pl.col("date").shift(-1).over("code").alias("date_t1"),
+        pl.col("close").shift(-3).over("code").alias("close_t3"),
+        pl.col("date").shift(-3).over("code").alias("date_t3"),
+        pl.col("close").shift(-5).over("code").alias("close_t5"),
+        pl.col("date").shift(-5).over("code").alias("date_t5"),
+        pl.col("close").shift(-10).over("code").alias("close_t10"),
+        pl.col("date").shift(-10).over("code").alias("date_t10"),
     ])
 
-    # 与因子表在 [code, date] 维度精确定向连接
+    # 🚀 物理时间轴防护关键逻辑：仅当未来交易日实际存在且不晚于数据库最新收盘日时有效
+    kline_df = kline_df.with_columns([
+        pl.when(pl.col("date_t1").is_not_null() & (pl.col("date_t1") <= latest_kline_date))
+          .then((pl.col("close_t1") / pl.col("close")) - 1.0).otherwise(None).alias("fwd_ret_t1"),
+
+        pl.when(pl.col("date_t3").is_not_null() & (pl.col("date_t3") <= latest_kline_date))
+          .then((pl.col("close_t3") / pl.col("close")) - 1.0).otherwise(None).alias("fwd_ret_t3"),
+
+        pl.when(pl.col("date_t5").is_not_null() & (pl.col("date_t5") <= latest_kline_date))
+          .then((pl.col("close_t5") / pl.col("close")) - 1.0).otherwise(None).alias("fwd_ret_t5"),
+
+        pl.when(pl.col("date_t10").is_not_null() & (pl.col("date_t10") <= latest_kline_date))
+          .then((pl.col("close_t10") / pl.col("close")) - 1.0).otherwise(None).alias("fwd_ret_t10"),
+    ])
+
+    # 与因子表精确定向连接
     joined_df = factor_df.join(
-        kline_df.select(["code", "date", "fwd_ret_t1", "fwd_ret_t2", "fwd_ret_t3", "fwd_ret_t5", "fwd_ret_t10"]),
+        kline_df.select(["code", "date", "fwd_ret_t1", "fwd_ret_t3", "fwd_ret_t5", "fwd_ret_t10"]),
         on=["code", "date"],
         how="left"
     )
-    return joined_df
+    return joined_df, latest_kline_date
 
 def compute_rank_ic(df: pl.DataFrame, score_col: str, ret_col: str) -> float | None:
-    """使用纯 Polars 向量化计算 Spearman Rank IC (即 Percentile Ranks 的 Pearson Correlation)"""
+    """纯 Polars 向量化 Spearman Rank IC 计算算子"""
     valid_sub = df.select([score_col, ret_col]).drop_nulls().drop_nans()
     if len(valid_sub) < 10:
         return None
@@ -97,40 +117,47 @@ def compute_rank_ic(df: pl.DataFrame, score_col: str, ret_col: str) -> float | N
     res = corr_df["rank_ic"][0]
     return float(res) if res is not None else None
 
-def run_part0_alignment_audit(df: pl.DataFrame, factor_file: str) -> str:
-    """PART 0: 样本对齐与未来收益覆盖率审计"""
+def run_part0_alignment_audit(df: pl.DataFrame, latest_kline_date: str) -> str:
+    """PART 0: 严格时间轴样本对齐与交割状态审计"""
     total_n = len(df)
     t1_valid = len(df.filter(pl.col("fwd_ret_t1").is_not_null()))
     t3_valid = len(df.filter(pl.col("fwd_ret_t3").is_not_null()))
     t5_valid = len(df.filter(pl.col("fwd_ret_t5").is_not_null()))
     t10_valid = len(df.filter(pl.col("fwd_ret_t10").is_not_null()))
 
+    # 判定交割状态
+    st_t1 = "VALID (已到期交割)" if t1_valid > 0 else "PENDING (未到期)"
+    st_t3 = "VALID (已到期交割)" if t3_valid > 0 else "PENDING (未到期)"
+    st_t5 = "VALID (已到期交割)" if t5_valid > 0 else "PENDING (未到期)"
+    st_t10 = "VALID (已到期交割)" if t10_valid > 0 else "PENDING (未到期)"
+
     text = f"""
 ================================================================================================
-      📊  PART 0: Sample Alignment & Forward Returns Coverage Audit
+      📊  PART 0: Timestamp-Protected Sample Alignment & Forward Returns Audit
 ================================================================================================
-Target Factor File : {os.path.basename(factor_file)}
-Total Stocks Fact  : {total_n}
-Forward Returns Coverage:
-  ├── T+1 Forward Return Valid : {t1_valid:<6} ({t1_valid/total_n*100:>5.1f}%)
-  ├── T+3 Forward Return Valid : {t3_valid:<6} ({t3_valid/total_n*100:>5.1f}%)
-  ├── T+5 Forward Return Valid : {t5_valid:<6} ({t5_valid/total_n*100:>5.1f}%)
-  └── T+10 Forward Return Valid: {t10_valid:<6} ({t10_valid/total_n*100:>5.1f}%)
+Latest Market Kline Date : {latest_kline_date}
+Total Evaluated Samples  : {total_n}
+Forward Horizon Delivery Status:
+  ├── T+1 Forward Return : {t1_valid:<6} ({t1_valid/total_n*100:>5.1f}%) | Status: {st_t1}
+  ├── T+3 Forward Return : {t3_valid:<6} ({t3_valid/total_n*100:>5.1f}%) | Status: {st_t3}
+  ├── T+5 Forward Return : {t5_valid:<6} ({t5_valid/total_n*100:>5.1f}%) | Status: {st_t5}
+  └── T+10 Forward Return: {t10_valid:<6} ({t10_valid/total_n*100:>5.1f}%) | Status: {st_t10}
 ================================================================================================
 """
     print(text)
     
-    md = f"""### 📊 PART 0: 样本对齐与未来收益覆盖率
-* **因子文件**: `{os.path.basename(factor_file)}`
-* **截面样本数**: `{total_n}`
-* **T+1 覆盖率**: `{t1_valid}` ({t1_valid/total_n*100:.1f}%)
-* **T+3 覆盖率**: `{t3_valid}` ({t3_valid/total_n*100:.1f}%)
-* **T+5 覆盖率**: `{t5_valid}` ({t5_valid/total_n*100:.1f}%)
+    md = f"""### 📊 PART 0: 严格时间轴样本对齐与未来收益交割状态
+* **最新市场 K 线日期**: `{latest_kline_date}`
+* **评估样本总行数**: `{total_n}`
+* **T+1 交割状态**: `{t1_valid}` 标的有效 (`{st_t1}`)
+* **T+3 交割状态**: `{t3_valid}` 标的有效 (`{st_t3}`)
+* **T+5 交割状态**: `{t5_valid}` 标的有效 (`{st_t5}`)
+* **T+10 交割状态**: `{t10_valid}` 标的有效 (`{st_t10}`)
 """
     return md
 
 def run_part1_rank_ic_audit(df: pl.DataFrame) -> str:
-    """PART 1: 连续型行为得分 Rank IC 与 IC 衰减分析"""
+    """PART 1: 连续型行为得分 Spearman Rank IC 审计"""
     target_scores = [
         ("accumulation_score", "Low Pos Acc Score"),
         ("attack_score", "High Pos Attack Score"),
@@ -142,10 +169,8 @@ def run_part1_rank_ic_audit(df: pl.DataFrame) -> str:
         ("response_factor", "Price Response Factor")
     ]
     
-    ret_cols = ["fwd_ret_t1", "fwd_ret_t3", "fwd_ret_t5", "fwd_ret_t10"]
-    
     print("\n" + "="*96)
-    print("      ⚡  PART 1: Continuous Behavior Scores Spearman Rank IC & Decay Audit      ")
+    print("      ⚡  PART 1: Continuous Behavior Scores Spearman Rank IC Audit      ")
     print("="*96)
     header = f"{'Factor Score Name':<28} | {'Rank IC (T+1)':<14} | {'Rank IC (T+3)':<14} | {'Rank IC (T+5)':<14} | {'Rank IC (T+10)':<14}"
     print(header)
@@ -161,24 +186,24 @@ def run_part1_rank_ic_audit(df: pl.DataFrame) -> str:
         ic_t5 = compute_rank_ic(df, score_col, "fwd_ret_t5")
         ic_t10 = compute_rank_ic(df, score_col, "fwd_ret_t10")
 
-        fmt_t1 = f"{ic_t1:>+14.4f}" if ic_t1 is not None else f"{'N/A':>14}"
-        fmt_t3 = f"{ic_t3:>+14.4f}" if ic_t3 is not None else f"{'N/A':>14}"
-        fmt_t5 = f"{ic_t5:>+14.4f}" if ic_t5 is not None else f"{'N/A':>14}"
-        fmt_t10 = f"{ic_t10:>+14.4f}" if ic_t10 is not None else f"{'N/A':>14}"
+        fmt_t1 = f"{ic_t1:>+14.4f}" if ic_t1 is not None else f"{'PENDING':>14}"
+        fmt_t3 = f"{ic_t3:>+14.4f}" if ic_t3 is not None else f"{'PENDING':>14}"
+        fmt_t5 = f"{ic_t5:>+14.4f}" if ic_t5 is not None else f"{'PENDING':>14}"
+        fmt_t10 = f"{ic_t10:>+14.4f}" if ic_t10 is not None else f"{'PENDING':>14}"
 
         print(f"{label:<28} | {fmt_t1} | {fmt_t3} | {fmt_t5} | {fmt_t10}")
 
-        md_t1 = f"{ic_t1:+.4f}" if ic_t1 is not None else "N/A"
-        md_t3 = f"{ic_t3:+.4f}" if ic_t3 is not None else "N/A"
-        md_t5 = f"{ic_t5:+.4f}" if ic_t5 is not None else "N/A"
-        md_t10 = f"{ic_t10:+.4f}" if ic_t10 is not None else "N/A"
+        md_t1 = f"{ic_t1:+.4f}" if ic_t1 is not None else "PENDING"
+        md_t3 = f"{ic_t3:+.4f}" if ic_t3 is not None else "PENDING"
+        md_t5 = f"{ic_t5:+.4f}" if ic_t5 is not None else "PENDING"
+        md_t10 = f"{ic_t10:+.4f}" if ic_t10 is not None else "PENDING"
         md_table += f"| **{label}** | {md_t1} | {md_t3} | {md_t5} | {md_t10} |\n"
 
     print("="*96)
-    return "### ⚡ PART 1: 行为得分 Rank IC 与 IC 衰减分析\n" + md_table
+    return "### ⚡ PART 1: 行为得分 Rank IC 审计\n" + md_table
 
 def run_part2_state_returns_audit(df: pl.DataFrame) -> str:
-    """PART 2: 状态机判定结果的 Forward Return 表现与胜率剖析"""
+    """PART 2: 状态机判定结果的 Forward Return 与胜率剖析"""
     print("\n" + "="*112)
     print("      🧠  PART 2: Primary State Forward Return & Win Rate Profile      ")
     print("="*112)
@@ -197,27 +222,39 @@ def run_part2_state_returns_audit(df: pl.DataFrame) -> str:
 
         # T+1
         sub_t1 = sub.filter(pl.col("fwd_ret_t1").is_not_null())
-        mean_t1 = sub_t1["fwd_ret_t1"].mean() if len(sub_t1) > 0 else 0.0
-        win_t1 = (len(sub_t1.filter(pl.col("fwd_ret_t1") > 0)) / len(sub_t1) * 100) if len(sub_t1) > 0 else 0.0
+        mean_t1 = sub_t1["fwd_ret_t1"].mean() if len(sub_t1) > 0 else None
+        win_t1 = (len(sub_t1.filter(pl.col("fwd_ret_t1") > 0)) / len(sub_t1) * 100) if len(sub_t1) > 0 else None
 
         # T+3
         sub_t3 = sub.filter(pl.col("fwd_ret_t3").is_not_null())
-        mean_t3 = sub_t3["fwd_ret_t3"].mean() if len(sub_t3) > 0 else 0.0
-        win_t3 = (len(sub_t3.filter(pl.col("fwd_ret_t3") > 0)) / len(sub_t3) * 100) if len(sub_t3) > 0 else 0.0
+        mean_t3 = sub_t3["fwd_ret_t3"].mean() if len(sub_t3) > 0 else None
+        win_t3 = (len(sub_t3.filter(pl.col("fwd_ret_t3") > 0)) / len(sub_t3) * 100) if len(sub_t3) > 0 else None
 
         # T+5
         sub_t5 = sub.filter(pl.col("fwd_ret_t5").is_not_null())
-        mean_t5 = sub_t5["fwd_ret_t5"].mean() if len(sub_t5) > 0 else 0.0
-        win_t5 = (len(sub_t5.filter(pl.col("fwd_ret_t5") > 0)) / len(sub_t5) * 100) if len(sub_t5) > 0 else 0.0
+        mean_t5 = sub_t5["fwd_ret_t5"].mean() if len(sub_t5) > 0 else None
+        win_t5 = (len(sub_t5.filter(pl.col("fwd_ret_t5") > 0)) / len(sub_t5) * 100) if len(sub_t5) > 0 else None
 
-        print(f"{st:<16} | {n:<6} | {mean_t1*100:>+9.2f}% | {win_t1:>11.1f}% | {mean_t3*100:>+9.2f}% | {win_t3:>11.1f}% | {mean_t5*100:>+9.2f}% | {win_t5:>11.1f}%")
-        md_table += f"| **{st}** | {n} | {mean_t1*100:+.2f}% | {win_t1:.1f}% | {mean_t3*100:+.2f}% | {win_t3:.1f}% |\n"
+        fmt_m_t1 = f"{mean_t1*100:>+9.2f}%" if mean_t1 is not None else f"{'PENDING':>10}"
+        fmt_w_t1 = f"{win_t1:>11.1f}%" if win_t1 is not None else f"{'PENDING':>12}"
+        fmt_m_t3 = f"{mean_t3*100:>+9.2f}%" if mean_t3 is not None else f"{'PENDING':>10}"
+        fmt_w_t3 = f"{win_t3:>11.1f}%" if win_t3 is not None else f"{'PENDING':>12}"
+        fmt_m_t5 = f"{mean_t5*100:>+9.2f}%" if mean_t5 is not None else f"{'PENDING':>10}"
+        fmt_w_t5 = f"{win_t5:>11.1f}%" if win_t5 is not None else f"{'PENDING':>12}"
+
+        print(f"{st:<16} | {n:<6} | {fmt_m_t1} | {fmt_w_t1} | {fmt_m_t3} | {fmt_w_t3} | {fmt_m_t5} | {fmt_w_t5}")
+
+        md_m_t1 = f"{mean_t1*100:+.2f}%" if mean_t1 is not None else "PENDING"
+        md_w_t1 = f"{win_t1:.1f}%" if win_t1 is not None else "PENDING"
+        md_m_t3 = f"{mean_t3*100:+.2f}%" if mean_t3 is not None else "PENDING"
+        md_w_t3 = f"{win_t3:.1f}%" if win_t3 is not None else "PENDING"
+        md_table += f"| **{st}** | {n} | {md_m_t1} | {md_w_t1} | {md_m_t3} | {md_w_t3} |\n"
 
     print("="*112)
     return "### 🧠 PART 2: 各大状态未来收益率与胜率表\n" + md_table
 
 def run_part3_confidence_tier_audit(df: pl.DataFrame) -> str:
-    """PART 3: 置信度梯队 (Confidence Tier) 收益单调性验证"""
+    """PART 3: 置信度梯队收益单调性验证"""
     print("\n" + "="*112)
     print("      🎯  PART 3: Confidence Tier Monotonicity Audit (State x Confidence Profile)      ")
     print("="*112)
@@ -247,28 +284,41 @@ def run_part3_confidence_tier_audit(df: pl.DataFrame) -> str:
                 continue
 
             sub_t1 = cell.filter(pl.col("fwd_ret_t1").is_not_null())
-            m_t1 = sub_t1["fwd_ret_t1"].mean() if len(sub_t1) > 0 else 0.0
-            w_t1 = (len(sub_t1.filter(pl.col("fwd_ret_t1") > 0)) / len(sub_t1) * 100) if len(sub_t1) > 0 else 0.0
+            m_t1 = sub_t1["fwd_ret_t1"].mean() if len(sub_t1) > 0 else None
+            w_t1 = (len(sub_t1.filter(pl.col("fwd_ret_t1") > 0)) / len(sub_t1) * 100) if len(sub_t1) > 0 else None
 
             sub_t3 = cell.filter(pl.col("fwd_ret_t3").is_not_null())
-            m_t3 = sub_t3["fwd_ret_t3"].mean() if len(sub_t3) > 0 else 0.0
-            w_t3 = (len(sub_t3.filter(pl.col("fwd_ret_t3") > 0)) / len(sub_t3) * 100) if len(sub_t3) > 0 else 0.0
+            m_t3 = sub_t3["fwd_ret_t3"].mean() if len(sub_t3) > 0 else None
+            w_t3 = (len(sub_t3.filter(pl.col("fwd_ret_t3") > 0)) / len(sub_t3) * 100) if len(sub_t3) > 0 else None
 
-            print(f"{st:<14} | {tr:<22} | {n:<6} | {m_t1*100:>+12.2f}% | {w_t1:>11.1f}% | {m_t3*100:>+12.2f}% | {w_t3:>11.1f}%")
-            md_table += f"| **{st}** | {tr} | {n} | {m_t1*100:+.2f}% | {w_t1:.1f}% | {m_t3*100:+.2f}% | {w_t3:.1f}% |\n"
+            fmt_m_t1 = f"{m_t1*100:>+12.2f}%" if m_t1 is not None else f"{'PENDING':>13}"
+            fmt_w_t1 = f"{w_t1:>11.1f}%" if w_t1 is not None else f"{'PENDING':>12}"
+            fmt_m_t3 = f"{m_t3*100:>+12.2f}%" if m_t3 is not None else f"{'PENDING':>13}"
+            fmt_w_t3 = f"{w_t3:>11.1f}%" if w_t3 is not None else f"{'PENDING':>12}"
+
+            print(f"{st:<14} | {tr:<22} | {n:<6} | {fmt_m_t1} | {fmt_w_t1} | {fmt_m_t3} | {fmt_w_t3}")
+
+            md_m_t1 = f"{m_t1*100:+.2f}%" if m_t1 is not None else "PENDING"
+            md_w_t1 = f"{w_t1:.1f}%" if w_t1 is not None else "PENDING"
+            md_m_t3 = f"{m_t3*100:+.2f}%" if m_t3 is not None else "PENDING"
+            md_w_t3 = f"{w_t3:.1f}%" if w_t3 is not None else "PENDING"
+            md_table += f"| **{st}** | {tr} | {n} | {md_m_t1} | {md_w_t1} | {md_m_t3} | {md_w_t3} |\n"
         print("-" * len(header))
 
     print("="*112)
     return "### 🎯 PART 3: 置信度梯队收益单调性验证表\n" + md_table
 
 def main():
-    target_file = find_latest_factor_file()
-    if not target_file:
+    files = find_factor_files()
+    if not files:
         print("❌ 未在 'data/output' 目录找到任何因子 Parquet 文件！Alpha 验证程序终止。")
         return
 
-    print(f"🔍 [Alpha Validation Engine] 正在加载最新因子文件进行 Alpha 验证: {target_file}", flush=True)
-    factor_df = pl.read_parquet(target_file)
+    print(f"🔍 [Alpha Validation Engine] 搜寻到 {len(files)} 个因子文件，加载进行联合 Alpha 验证...", flush=True)
+    
+    # 汇总 data/output 下所有的因子 Parquet 文件
+    dfs = [pl.read_parquet(f) for f in files]
+    factor_df = pl.concat(dfs)
 
     # 1. 确保 Go 提取内核存在
     ensure_fetcher_core()
@@ -278,24 +328,24 @@ def main():
     kline_csv = "data/temp_chunks/alpha_validation_kline.csv"
     fetch_forward_klines(codes, kline_csv)
 
-    # 3. 拼接推导 T+1 ~ T+10 Forward Returns
-    validated_df = calculate_forward_returns(factor_df, kline_csv)
+    # 3. 拼接推导 T+1 ~ T+10 Forward Returns (带严格时间轴防线)
+    validated_df, latest_kline_date = calculate_forward_returns_with_guard(factor_df, kline_csv)
 
     # 4. 执行 4 大审计面板
-    md0 = run_part0_alignment_audit(validated_df, target_file)
+    md0 = run_part0_alignment_audit(validated_df, latest_kline_date)
     md1 = run_part1_rank_ic_audit(validated_df)
     md2 = run_part2_state_returns_audit(validated_df)
     md3 = run_part3_confidence_tier_audit(validated_df)
 
     # 5. 输出 Markdown 至 GitHub Step Summary
-    full_markdown = f"# 📈 TDX High-Freq Behavior Factors: Forward Alpha & Rank IC Report\n\n" + md0 + "\n" + md1 + "\n" + md2 + "\n" + md3
+    full_markdown = f"# 📈 TDX High-Freq Behavior Factors: Timestamp-Protected Alpha Report\n\n" + md0 + "\n" + md1 + "\n" + md2 + "\n" + md3
     append_to_github_summary(full_markdown)
 
     # 清理临时文件
     if os.path.exists(kline_csv):
         os.remove(kline_csv)
 
-    print("\n🏁 [Alpha Validation Engine] 跨截面 Alpha 收益率与 Rank IC 验证完成。\n", flush=True)
+    print("\n🏁 [Alpha Validation Engine] 严格时间轴 Alpha 收益率与 Rank IC 验证完成。\n", flush=True)
 
 if __name__ == "__main__":
     main()
