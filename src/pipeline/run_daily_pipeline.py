@@ -1,3 +1,4 @@
+# FILE: src/pipeline/run_daily_pipeline.py
 import os
 import sys
 import json
@@ -87,7 +88,7 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
     if not market_ctx_df.is_empty():
         real_context_df = real_context_df.join(market_ctx_df, on="code", how="left")
         
-    # 定义缺失特征的前置回退默认值（防止新股计算为空导致的整行丢失）
+    # 🚀 闸门2：定义缺失特征的前置回退默认值（补充三个新增字段，防范左连接空值）
     fallback_map = {
         "adv_20_pre": 1000000.0,
         "atr_10_pre": 0.1,
@@ -99,7 +100,10 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
         "pp_20_pre": 0.5,
         "pp_60_pre": 0.5,
         "bias_20_pre": 0.0,
-        "rs_5_pre": 0.0
+        "rs_5_pre": 0.0,
+        "daily_return": 0.0,
+        "atr_pct_10_pre": 0.002,
+        "effective_range_60_pre": 0.01
     }
     for col_name, default_val in fallback_map.items():
         if col_name not in real_context_df.columns:
@@ -107,7 +111,7 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
         else:
             real_context_df = real_context_df.with_columns(pl.col(col_name).fill_null(default_val))
 
-    # 物理物理清理临时分片，防止 Actions 沙盒存储溢出
+    # 物理清理临时分片，防止 Actions 沙盒存储溢出
     if os.path.exists(tick_csv): os.remove(tick_csv)
     if os.path.exists(kline_csv): os.remove(kline_csv)
 
@@ -122,7 +126,7 @@ def run_chunk_pipeline(chunk_idx: int, codes: list, date_str: str, settings: dic
             continue
         
         stock_ctx = context_map.get(code, fallback_map)
-        prev_close_val = float(stock_ctx.get("close_pre", 1.0))
+        prev_close_val = float(stock_ctx.get("close_pre") if stock_ctx.get("close_pre") is not None else 1.0)
         
         # 提取集合竞价特征
         auction_features = extract_auction_features(single_ticks, prev_close_val)
