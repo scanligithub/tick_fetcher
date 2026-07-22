@@ -41,9 +41,13 @@ jobs:
         run: |
           python src/pipeline/run_daily_pipeline.py
 
-      - name: 📊 Run Factor Distribution & Semantic Audit
+      - name: 📊 Run Factor Distribution Audit
         run: |
           python src/pipeline/factor_audit.py
+
+      - name: 🔬 Run Semantic State Audit (PART 0 - PART 4)
+        run: |
+          python src/pipeline/semantic_state_audit.py
 
       - name: 📤 Upload Captured Compressed Parquet Factors
         uses: actions/upload-artifact@v4
